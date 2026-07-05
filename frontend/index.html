@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NIFTY Options Scalper — Upstox</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 12 L5 7 L8 9 L14 3' stroke='%232a78d6' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
+    --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
+    --spot:#2a78d6; --ema:#1baf7a;
+    --good:#0ca30c; --goodtext:#006300; --warn:#fab219; --crit:#d03b3b;
+    --live:#d03b3b; --paper:#2a78d6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --page:#0d0d0d; --surface:#1a1a19; --ink:#ffffff; --ink2:#c3c2b7; --muted:#898781;
+      --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
+      --spot:#3987e5; --ema:#199e70; --goodtext:#0ca30c;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--ink);
+       font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+         padding:14px 20px;border-bottom:1px solid var(--border);background:var(--surface)}
+  header h1{font-size:16px;margin:0;font-weight:650}
+  .badge{padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;
+         border:1px solid var(--border);color:var(--ink2)}
+  .badge.paper{color:var(--paper);border-color:var(--paper)}
+  .badge.live{color:#fff;background:var(--live);border-color:var(--live)}
+  .badge.on{color:var(--goodtext);border-color:var(--good)}
+  .badge.off{color:var(--muted)}
+  .spacer{flex:1}
+  .clock{color:var(--muted);font-variant-numeric:tabular-nums}
+  main{max-width:1180px;margin:0 auto;padding:16px 20px;display:grid;gap:14px}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px}
+  .card h2{font-size:13px;margin:0 0 10px;color:var(--ink2);font-weight:650;
+           text-transform:uppercase;letter-spacing:.04em}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  button{font:inherit;padding:7px 14px;border-radius:8px;border:1px solid var(--border);
+         background:var(--surface);color:var(--ink);cursor:pointer;font-weight:600}
+  button:hover{border-color:var(--muted)}
+  button.primary{background:var(--spot);border-color:var(--spot);color:#fff}
+  button.danger{background:var(--crit);border-color:var(--crit);color:#fff}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  label.opt{display:inline-flex;gap:6px;align-items:center;cursor:pointer;color:var(--ink2)}
+  .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+  .tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px}
+  .tile .k{font-size:12px;color:var(--muted)}
+  .tile .v{font-size:22px;font-weight:650;margin-top:2px}
+  .tile .s{font-size:12px;color:var(--ink2)}
+  .pos{color:var(--goodtext)} .neg{color:var(--crit)}
+  .tabs{display:flex;gap:6px}
+  .tabs button{padding:4px 12px;font-size:12px}
+  .tabs button.active{background:var(--spot);border-color:var(--spot);color:#fff}
+  #chartwrap{position:relative;overflow-x:auto}
+  svg text{font:11px system-ui,sans-serif;fill:var(--muted)}
+  .legend{display:flex;gap:16px;font-size:12px;color:var(--ink2);margin-top:6px}
+  .legend i{display:inline-block;width:14px;height:3px;border-radius:2px;vertical-align:middle;margin-right:5px}
+  .tip{position:absolute;pointer-events:none;background:var(--surface);border:1px solid var(--border);
+       border-radius:8px;padding:6px 10px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.15);
+       display:none;white-space:nowrap;z-index:5}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--grid);
+        font-variant-numeric:tabular-nums}
+  th{color:var(--muted);font-weight:600;font-size:12px}
+  .log{max-height:230px;overflow-y:auto;font-size:12.5px}
+  .log div{padding:3px 0;border-bottom:1px solid var(--grid);color:var(--ink2)}
+  .log b{color:var(--muted);font-weight:600;margin-right:6px;font-variant-numeric:tabular-nums}
+  .log .error{color:var(--crit)} .log .trade{color:var(--ink);font-weight:600}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:860px){.grid2{grid-template-columns:1fr}}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:3px 16px;font-size:13px}
+  .kv .k{color:var(--muted)}
+  .gate{display:flex;gap:8px;align-items:center;padding:3px 0;font-size:13px;color:var(--ink2)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--good);flex:none}
+  .dot.block{background:var(--crit)}
+  details.cfg summary{cursor:pointer;font-weight:600;color:var(--ink2)}
+  .cfggrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;margin-top:12px}
+  .cfggrid label{display:block;font-size:12px;color:var(--muted)}
+  .cfggrid input[type=number],.cfggrid input[type=text]{width:100%;padding:5px 8px;font:inherit;
+      border:1px solid var(--border);border-radius:6px;background:var(--page);color:var(--ink)}
+  dialog{border:1px solid var(--border);border-radius:12px;background:var(--surface);color:var(--ink);
+         max-width:420px;padding:20px}
+  dialog::backdrop{background:rgba(0,0,0,.45)}
+  dialog input{width:100%;padding:8px;font:inherit;border:1px solid var(--border);
+               border-radius:8px;background:var(--page);color:var(--ink);margin:10px 0}
+  .note{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>NIFTY Intraday Options Scalper</h1>
+  <span id="modeBadge" class="badge paper">PAPER</span>
+  <span id="runBadge" class="badge off">STOPPED</span>
+  <span id="mktBadge" class="badge off">MARKET</span>
+  <span class="spacer"></span>
+  <span id="authName" class="note"></span>
+  <button id="btnConnect">Connect Upstox</button>
+  <button id="btnToken">Paste token</button>
+  <span id="clock" class="clock">--:--:--</span>
+</header>
+
+<main>
+  <section class="card">
+    <div class="row">
+      <button id="btnStart" class="primary">▶ Start engine</button>
+      <button id="btnStop">■ Stop</button>
+      <button id="btnSquare" class="danger">Square off</button>
+      <span style="width:14px"></span>
+      <label class="opt"><input type="radio" name="mode" value="paper"> Paper trade</label>
+      <label class="opt"><input type="radio" name="mode" value="live"> Real (live) trade</label>
+      <span style="width:14px"></span>
+      <span class="note">Timeframes:</span>
+      <label class="opt"><input type="checkbox" id="tf1"> 1 min</label>
+      <label class="opt"><input type="checkbox" id="tf5"> 5 min</label>
+    </div>
+    <div id="blockReason" class="note" style="margin-top:8px"></div>
+  </section>
+
+  <section class="tiles">
+    <div class="tile"><div class="k">NIFTY 50 spot</div><div class="v" id="tSpot">—</div>
+      <div class="s" id="tExpiry"></div></div>
+    <div class="tile"><div class="k" id="tEmaK">9-EMA</div><div class="v" id="tEma">—</div>
+      <div class="s" id="tCandle"></div></div>
+    <div class="tile"><div class="k">Day net P&amp;L</div><div class="v" id="tPnl">₹0</div>
+      <div class="s" id="tGross"></div></div>
+    <div class="tile"><div class="k">Trades today</div><div class="v" id="tTrades">0/2</div>
+      <div class="s" id="tLoss"></div></div>
+    <div class="tile"><div class="k">Equity (capital + net)</div><div class="v" id="tEquity">—</div>
+      <div class="s" id="tCap"></div></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">NIFTY 50 spot vs 9-EMA (close-line, no candlesticks)</h2>
+      <div class="tabs"><button data-tf="1m" id="tab1">1 min</button>
+        <button data-tf="5m" id="tab5" class="active">5 min</button></div>
+    </div>
+    <div id="chartwrap">
+      <svg id="chart" width="100%" height="260" viewBox="0 0 1080 260" preserveAspectRatio="none"></svg>
+      <div id="tip" class="tip"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--spot)"></i>Spot close</span>
+      <span><i style="background:var(--ema)"></i>9-EMA</span>
+    </div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Open position</h2>
+      <div id="position"><span class="note">No open position.</span></div>
+    </section>
+    <section class="card">
+      <h2>Risk overlays</h2>
+      <div id="gates"></div>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>Trades (today)</h2>
+    <div style="overflow-x:auto">
+    <table><thead><tr>
+      <th>TF</th><th>Mode</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th>
+      <th>Points</th><th>Gross ₹</th><th>Charges ₹</th><th>Net ₹</th><th>Reason</th><th>Time</th>
+    </tr></thead><tbody id="tradeRows"><tr><td colspan="12" class="note">No trades yet today.</td></tr></tbody></table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Activity log</h2>
+    <div class="log" id="log"></div>
+  </section>
+
+  <section class="card">
+    <details class="cfg"><summary>Strategy settings</summary>
+      <div class="cfggrid" id="cfgGrid"></div>
+      <div class="row" style="margin-top:12px">
+        <button id="btnSaveCfg" class="primary">Save settings</button>
+        <span class="note">Entries use LIMIT orders; SL &amp; square-off exit as MARKET.</span>
+      </div>
+    </details>
+  </section>
+
+  <p class="note">All prices are live Upstox market data — this dashboard uses no synthetic or
+  simulated data. Paper mode simulates order fills only, at real market prices. Options trading
+  involves substantial risk of loss; live mode places real orders on your Upstox account.</p>
+</main>
+
+<dialog id="dlgToken">
+  <h3 style="margin-top:0">Set Upstox access token</h3>
+  <p class="note">Use “Connect Upstox” for the OAuth flow, or paste a token generated elsewhere.
+     Upstox tokens expire daily around 3:30 AM IST.</p>
+  <input id="tokenInput" type="password" placeholder="access token">
+  <div class="row" style="justify-content:flex-end">
+    <button onclick="dlgToken.close()">Cancel</button>
+    <button class="primary" id="btnSaveToken">Save</button>
+  </div>
+</dialog>
+
+<dialog id="dlgLive">
+  <h3 style="margin-top:0">Enable REAL trading?</h3>
+  <p>Live mode places <b>real orders with real money</b> on your Upstox account
+     (2 lots of NIFTY options per signal). Type <b>LIVE</b> to confirm.</p>
+  <input id="liveConfirm" placeholder="Type LIVE">
+  <div class="row" style="justify-content:flex-end">
+    <button id="btnLiveCancel">Cancel</button>
+    <button class="danger" id="btnLiveOk">Enable live trading</button>
+  </div>
+</dialog>
+
+<script>
+const $ = id => document.getElementById(id);
+let state = null, chartTf = '5m';
+
+const api = async (path, opts) => {
+  const r = await fetch(path, opts);
+  if (!r.ok) { let m = 'Request failed'; try { m = (await r.json()).detail || m; } catch(e){}
+    throw new Error(m); }
+  return r.json();
+};
+const post = (path, body) => api(path, {method:'POST', headers:{'Content-Type':'application/json'},
+  body: body ? JSON.stringify(body) : '{}'});
+const fmt = (n, d=2) => n==null ? '—' : Number(n).toLocaleString('en-IN',
+  {minimumFractionDigits:d, maximumFractionDigits:d});
+const rs = n => (n<0?'-':'') + '₹' + fmt(Math.abs(n));
+const toast = m => { alert(m); };
+
+// ---------- polling ----------
+async function refresh(){
+  try { state = await api('/api/status'); render(); } catch(e) {}
+}
+async function refreshAuth(){
+  try {
+    const a = await api('/api/auth/status');
+    $('authName').textContent = a.profile ? `Upstox: ${a.profile.name || a.profile.user_id}`
+      : (a.token_present ? 'Upstox: connected' : 'Upstox: not connected');
+    $('btnConnect').style.display = a.token_present ? 'none' : '';
+  } catch(e) {}
+}
+setInterval(refresh, 2000); setInterval(refreshAuth, 30000);
+refresh(); refreshAuth();
+
+// ---------- render ----------
+function render(){
+  const s = state; if (!s) return;
+  $('clock').textContent = s.now_ist + ' IST';
+  $('modeBadge').textContent = s.mode.toUpperCase();
+  $('modeBadge').className = 'badge ' + s.mode;
+  $('runBadge').textContent = s.running ? 'RUNNING' : 'STOPPED';
+  $('runBadge').className = 'badge ' + (s.running ? 'on' : 'off');
+  $('mktBadge').textContent = s.risk.market_open ? 'MARKET OPEN' : 'MARKET CLOSED';
+  $('mktBadge').className = 'badge ' + (s.risk.market_open ? 'on' : 'off');
+  document.querySelectorAll('input[name=mode]').forEach(r => r.checked = r.value === s.mode);
+  $('tf1').checked = s.config.timeframes.includes(1);
+  $('tf5').checked = s.config.timeframes.includes(5);
+  $('blockReason').textContent = s.risk.entry_block_reason
+    ? 'Entries blocked: ' + s.risk.entry_block_reason : '';
+
+  // tiles
+  $('tSpot').textContent = fmt(s.spot);
+  $('tExpiry').textContent = s.expiry ? `Expiry ${s.expiry} · lot ${s.lot_size ?? '—'}` : '';
+  const eng = s.engines[chartTf] || Object.values(s.engines)[0];
+  if (eng) {
+    $('tEmaK').textContent = `9-EMA (${eng.timeframe} min)`;
+    $('tEma').textContent = fmt(eng.ema);
+    $('tCandle').textContent = eng.last_candle_ts ?
+      'last candle ' + eng.last_candle_ts.slice(11,16) : '';
+  }
+  const net = s.risk.day_net_rs + (s.position ? s.position.unrealized_rs : 0);
+  $('tPnl').textContent = rs(net);
+  $('tPnl').className = 'v ' + (net >= 0 ? 'pos' : 'neg');
+  $('tGross').textContent = `gross ${rs(s.risk.day_gross_rs)} · charges ${rs(s.risk.day_charges_rs)}`;
+  $('tTrades').textContent = `${s.risk.trades_taken}/${s.risk.max_trades}`;
+  $('tLoss').textContent = s.risk.consecutive_losses ?
+    `${s.risk.consecutive_losses} consecutive SL` : '';
+  $('tEquity').textContent = rs(s.pnl.equity);
+  $('tCap').textContent = `capital ${rs(s.pnl.capital)}`;
+
+  renderPosition(s); renderGates(s); renderTrades(s); renderLog(s);
+  drawChart(eng);
+}
+
+function renderPosition(s){
+  const el = $('position');
+  if (s.pending_entry) {
+    const p = s.pending_entry;
+    el.innerHTML = `<div class="kv">
+      <span class="k">Entry pending</span><span>${p.symbol} — BUY ${p.qty} LIMIT @ ₹${fmt(p.limit)}</span>
+      <span class="k">Timeframe</span><span>${p.tf}</span>
+      <span class="k">Cancels in</span><span>${p.seconds_left}s if unfilled</span></div>`;
+    return;
+  }
+  if (!s.position) { el.innerHTML = '<span class="note">No open position.</span>'; return; }
+  const p = s.position, cls = p.unrealized_rs >= 0 ? 'pos' : 'neg';
+  el.innerHTML = `<div class="kv">
+    <span class="k">Contract</span><span><b>${p.symbol}</b> (${p.side} ${p.strike}, exp ${p.expiry})</span>
+    <span class="k">Qty / TF</span><span>${p.qty} · ${p.tf} signal · entered ${p.entry_time}</span>
+    <span class="k">Entry / LTP</span><span>₹${fmt(p.entry)} → ₹${fmt(p.ltp)}</span>
+    <span class="k">Target / Stop</span><span>₹${fmt(p.target)} / ₹${fmt(p.stoploss)}</span>
+    <span class="k">Unrealized</span><span class="${cls}"><b>${p.unrealized_points>=0?'+':''}${fmt(p.unrealized_points)} pts (${rs(p.unrealized_rs)})</b></span>
+    ${p.exiting ? `<span class="k">Exiting</span><span>${p.exiting} order in flight…</span>` : ''}
+  </div>`;
+}
+
+function renderGates(s){
+  const r = s.risk, c = s.config;
+  const g = (ok, label) =>
+    `<div class="gate"><span class="dot ${ok?'':'block'}"></span>${label}</div>`;
+  $('gates').innerHTML =
+    g(r.market_open, 'Market hours (09:15–15:30 IST)') +
+    g(!r.midday_block_active, `Mid-day block ${c.midday_block_start}–${c.midday_block_end} ` +
+      (r.midday_block_active ? '(ACTIVE — entries suspended)' : '(clear)')) +
+    g(r.trades_taken < r.max_trades, `Daily setups used: ${r.trades_taken}/${r.max_trades}`) +
+    g(!r.target_hit, r.target_hit ? 'Target cutoff hit — done for the day'
+                                  : 'Target cutoff (stop after first target)') +
+    g(r.consecutive_losses < c.max_consecutive_losses,
+      `Consecutive stop-losses: ${r.consecutive_losses}/${c.max_consecutive_losses}`) +
+    g(true, `Flat-EMA filter: ${c.flat_ema_filter ? 'on' : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
+    g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`);
+}
+
+function renderTrades(s){
+  const tb = $('tradeRows');
+  if (!s.trades.length) {
+    tb.innerHTML = '<tr><td colspan="12" class="note">No trades yet today.</td></tr>'; return; }
+  tb.innerHTML = s.trades.map(t => `<tr>
+    <td>${t.tf}</td><td>${t.mode}</td><td>${t.symbol}</td><td>${t.qty}</td>
+    <td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
+    <td class="${t.points>=0?'pos':'neg'}">${t.points>=0?'+':''}${fmt(t.points)}</td>
+    <td>${fmt(t.gross_rs)}</td><td>${fmt(t.charges_rs)}</td>
+    <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td>
+    <td>${t.reason}</td><td>${t.entry_time}–${t.exit_time}</td></tr>`).join('');
+}
+
+function renderLog(s){
+  $('log').innerHTML = s.events.map(e =>
+    `<div class="${e.kind}"><b>${e.ts}</b>${e.msg}</div>`).join('');
+}
+
+// ---------- line chart (SVG, hover crosshair; deliberately not candlesticks) ----------
+let chartData = [];
+function drawChart(eng){
+  const svg = $('chart');
+  if (!eng || !eng.series || eng.series.length < 2) {
+    svg.innerHTML = '<text x="20" y="40">Waiting for live candles…</text>'; return; }
+  const pts = eng.series; chartData = pts;
+  const W = 1080, H = 260, L = 56, R = 70, T = 12, B = 24;
+  const vals = [];
+  pts.forEach(p => { vals.push(p.c); if (p.e != null) vals.push(p.e); });
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  const pad = Math.max((hi - lo) * 0.08, 2); lo -= pad; hi += pad;
+  const x = i => L + i * (W - L - R) / (pts.length - 1);
+  const y = v => T + (hi - v) * (H - T - B) / (hi - lo);
+  let out = '';
+  for (let g = 0; g <= 4; g++) {
+    const v = lo + (hi - lo) * g / 4, yy = y(v);
+    out += `<line x1="${L}" y1="${yy}" x2="${W-R}" y2="${yy}" stroke="var(--grid)" stroke-width="1"/>`;
+    out += `<text x="${L-8}" y="${yy+4}" text-anchor="end">${v.toFixed(0)}</text>`;
+  }
+  const step = Math.max(1, Math.floor(pts.length / 8));
+  for (let i = 0; i < pts.length; i += step)
+    out += `<text x="${x(i)}" y="${H-6}" text-anchor="middle">${pts[i].t}</text>`;
+  const line = (get, color) => {
+    let d = '', started = false;
+    pts.forEach((p, i) => { const v = get(p); if (v == null) return;
+      d += (started ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(v).toFixed(1); started = true; });
+    return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2"
+             vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+  };
+  out += line(p => p.e, 'var(--ema)') + line(p => p.c, 'var(--spot)');
+  const last = pts[pts.length - 1];
+  out += `<text x="${W-R+6}" y="${y(last.c)+4}" fill="var(--spot)" style="fill:var(--spot);font-weight:600">${last.c.toFixed(1)}</text>`;
+  if (last.e != null)
+    out += `<text x="${W-R+6}" y="${y(last.e)+ (Math.abs(y(last.e)-y(last.c))<14?16:4)}" style="fill:var(--ema);font-weight:600">${last.e.toFixed(1)}</text>`;
+  out += `<line id="xhair" y1="${T}" y2="${H-B}" stroke="var(--axis)" stroke-width="1" visibility="hidden"/>`;
+  svg.innerHTML = out;
+  svg._geom = {L, R, W, pts, x};
+}
+
+const wrap = $('chartwrap'), tip = $('tip');
+wrap.addEventListener('mousemove', ev => {
+  const svg = $('chart'), g = svg._geom; if (!g) return;
+  const rect = svg.getBoundingClientRect();
+  const fx = (ev.clientX - rect.left) / rect.width * g.W;
+  const i = Math.max(0, Math.min(g.pts.length - 1,
+    Math.round((fx - g.L) / (g.W - g.L - g.R) * (g.pts.length - 1))));
+  const p = g.pts[i], xh = svg.querySelector('#xhair');
+  if (xh) { xh.setAttribute('x1', g.x(i)); xh.setAttribute('x2', g.x(i));
+            xh.setAttribute('visibility', 'visible'); }
+  tip.style.display = 'block';
+  tip.style.left = Math.min(ev.clientX - rect.left + 14, rect.width - 170) + 'px';
+  tip.style.top = '14px';
+  tip.innerHTML = `<b>${p.t}</b><br>Close ${fmt(p.c)}<br>9-EMA ${p.e != null ? fmt(p.e) : '—'}`;
+});
+wrap.addEventListener('mouseleave', () => {
+  tip.style.display = 'none';
+  const xh = $('chart').querySelector('#xhair'); if (xh) xh.setAttribute('visibility','hidden');
+});
+
+// ---------- controls ----------
+$('tab1').onclick = () => { chartTf = '1m'; setTab(); };
+$('tab5').onclick = () => { chartTf = '5m'; setTab(); };
+function setTab(){
+  $('tab1').className = chartTf === '1m' ? 'active' : '';
+  $('tab5').className = chartTf === '5m' ? 'active' : '';
+  if (state) render();
+}
+$('btnConnect').onclick = () => location.href = '/api/auth/login';
+$('btnToken').onclick = () => { $('tokenInput').value=''; dlgToken.showModal(); };
+$('btnSaveToken').onclick = async () => {
+  try { await post('/api/auth/token', {access_token: $('tokenInput').value});
+        dlgToken.close(); refreshAuth(); } catch(e){ toast(e.message); }
+};
+$('btnStart').onclick = async () => { try { await post('/api/start'); refresh(); } catch(e){ toast(e.message); } };
+$('btnStop').onclick  = async () => { try { await post('/api/stop'); refresh(); } catch(e){ toast(e.message); } };
+$('btnSquare').onclick = async () => {
+  if (!confirm('Square off the open position at market?')) return;
+  try { await post('/api/squareoff'); refresh(); } catch(e){ toast(e.message); }
+};
+document.querySelectorAll('input[name=mode]').forEach(r => r.onchange = async () => {
+  if (r.value === 'live') { $('liveConfirm').value=''; dlgLive.showModal(); render(); return; }
+  try { await post('/api/mode', {mode:'paper'}); refresh(); } catch(e){ toast(e.message); refresh(); }
+});
+$('btnLiveCancel').onclick = () => { dlgLive.close(); refresh(); };
+$('btnLiveOk').onclick = async () => {
+  if ($('liveConfirm').value.trim() !== 'LIVE') { toast('Type LIVE to confirm.'); return; }
+  try { await post('/api/mode', {mode:'live'}); dlgLive.close(); refresh(); }
+  catch(e){ toast(e.message); dlgLive.close(); refresh(); }
+};
+const tfChange = async () => {
+  const tfs = [];
+  if ($('tf1').checked) tfs.push(1);
+  if ($('tf5').checked) tfs.push(5);
+  if (!tfs.length) { toast('At least one timeframe must stay enabled.'); render(); return; }
+  try { await post('/api/config', {timeframes: tfs}); refresh(); } catch(e){ toast(e.message); refresh(); }
+};
+$('tf1').onchange = tfChange; $('tf5').onchange = tfChange;
+
+// ---------- settings ----------
+const CFG_FIELDS = [
+  ['ema_period','EMA period','number'], ['decisive_points','Decisive close (pts)','number'],
+  ['target_points','Target (+pts)','number'], ['stoploss_points','Stop-loss (−pts)','number'],
+  ['lots','Lots','number'], ['premium_band_low','Premium band low ₹','number'],
+  ['premium_band_high','Premium band high ₹','number'], ['delta_low','Delta low','number'],
+  ['delta_high','Delta high','number'], ['max_trades_per_day','Max trades/day','number'],
+  ['max_consecutive_losses','Max consecutive SL','number'],
+  ['flat_ema_points','Flat-EMA threshold (pts)','number'],
+  ['midday_block_start','Block start (HH:MM)','text'], ['midday_block_end','Block end (HH:MM)','text'],
+  ['no_entries_after','No entries after (HH:MM)','text'], ['square_off_at','Square off at (HH:MM)','text'],
+  ['entry_limit_buffer','Entry limit buffer ₹','number'],
+  ['entry_fill_timeout_sec','Entry fill timeout (s)','number'],
+  ['round_trip_charges','Round-trip charges ₹','number'], ['capital','Capital ₹','number'],
+];
+let cfgBuilt = false;
+function buildCfg(){
+  if (cfgBuilt || !state) return; cfgBuilt = true;
+  $('cfgGrid').innerHTML = CFG_FIELDS.map(([k,label,type]) =>
+    `<label>${label}<input data-k="${k}" type="${type}" step="any"
+       value="${state.config[k]}"></label>`).join('') +
+    `<label>Flat-EMA filter<br><input data-k="flat_ema_filter" type="checkbox"
+       ${state.config.flat_ema_filter?'checked':''}></label>` +
+    `<label>Stop after target<br><input data-k="stop_after_target" type="checkbox"
+       ${state.config.stop_after_target?'checked':''}></label>` +
+    `<label>Mid-day block<br><input data-k="midday_block" type="checkbox"
+       ${state.config.midday_block?'checked':''}></label>`;
+}
+document.querySelector('details.cfg').addEventListener('toggle', buildCfg);
+$('btnSaveCfg').onclick = async () => {
+  const body = {};
+  document.querySelectorAll('#cfgGrid input').forEach(inp => {
+    const k = inp.dataset.k;
+    body[k] = inp.type === 'checkbox' ? inp.checked
+            : inp.type === 'number' ? Number(inp.value) : inp.value;
+  });
+  try { await post('/api/config', body); toast('Settings saved.'); cfgBuilt=false; refresh(); }
+  catch(e){ toast(e.message); }
+};
+</script>
+</body>
+</html>
