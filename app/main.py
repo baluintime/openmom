@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 
+from .backtest import Backtester
 from .config import EnvSettings, load_strategy_config, save_strategy_config
 from .engine import Engine
 from .upstox_client import UpstoxClient, UpstoxError
@@ -16,6 +17,7 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
 env = EnvSettings()
 client = UpstoxClient(env.api_key, env.api_secret, env.redirect_uri)
 engine = Engine(client, load_strategy_config())
+backtester = Backtester(client)
 
 app = FastAPI(title="NIFTY Intraday Options Scalper (Upstox)")
 
@@ -163,6 +165,28 @@ async def set_config(body: dict = Body(...)):
 @app.get("/api/trades")
 async def trades():
     return engine.trades
+
+
+# ---------------- backtesting (real historical data) ----------------
+
+@app.post("/api/backtest/run")
+async def backtest_run(body: dict = Body(default={})):
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    yesterday = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1))
+    to_date = body.get("to_date") or yesterday.isoformat()
+    from_date = body.get("from_date") or (yesterday - timedelta(days=30)).isoformat()
+    tfs = body.get("timeframes") or engine.cfg.timeframes
+    try:
+        backtester.start(engine.cfg, from_date, to_date, tfs)
+    except (UpstoxError, ValueError) as e:
+        raise HTTPException(400, str(e))
+    return {"started": True, "from": from_date, "to": to_date, "timeframes": tfs}
+
+
+@app.get("/api/backtest/status")
+async def backtest_status():
+    return backtester.status()
 
 
 def main() -> None:

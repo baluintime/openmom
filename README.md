@@ -83,6 +83,29 @@ Upstox access tokens expire daily (~3:30 AM IST); reconnect each morning.
 | `GET /api/trades` | Today's trade log |
 | `GET /api/auth/login` → `/api/auth/callback` | Upstox OAuth flow |
 | `POST /api/auth/token` | Set an access token manually |
+| `POST /api/backtest/run` `{"from_date","to_date","timeframes":[1,5]}` | Start a backtest (defaults: last ~1 month, both timeframes) |
+| `GET /api/backtest/status` | Backtest progress and, when done, the full result |
+
+## Backtesting
+
+The dashboard's **Backtest** card replays the exact engine rules over a chosen
+date range (default: the last month, up to yesterday) using only real Upstox
+historical data:
+
+- NIFTY 50 spot 1-min/5-min candles → signals, flat-EMA filter, all risk gates
+- 1-min premium candles of the actual contract the selection rules pick —
+  via the *expired-instruments* API for past expiries, the regular
+  historical-candle API for still-active ones
+
+It reports, per timeframe: final net P&L (after ₹56/round-trip charges),
+trade count, win rate, exit-reason breakdown, best/worst day and a
+trade-by-trade table.
+
+Honest approximations (tick data is not available historically): entries fill
+at the open of the candle after the signal candle; within a candle the
+stop-loss is evaluated before the target (conservative); the delta filter is
+not applied because historical option greeks are unavailable. Treat results
+as a realistic estimate, not an exact replay.
 
 ## Notes & disclaimers
 

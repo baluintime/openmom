@@ -46,6 +46,9 @@
   button.danger{background:var(--crit);border-color:var(--crit);color:#fff}
   button:disabled{opacity:.45;cursor:not-allowed}
   label.opt{display:inline-flex;gap:6px;align-items:center;cursor:pointer;color:var(--ink2)}
+  input[type=date]{padding:5px 8px;font:inherit;border:1px solid var(--border);
+                   border-radius:6px;background:var(--page);color:var(--ink)}
+  h3{font-size:14px;color:var(--ink)}
   .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
   .tile{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px}
   .tile .k{font-size:12px;color:var(--muted)}
@@ -168,6 +171,27 @@
       <th>Points</th><th>Gross ₹</th><th>Charges ₹</th><th>Net ₹</th><th>Reason</th><th>Time</th>
     </tr></thead><tbody id="tradeRows"><tr><td colspan="12" class="note">No trades yet today.</td></tr></tbody></table>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>Backtest — real Upstox historical data</h2>
+    <div class="row">
+      <label class="opt">From <input type="date" id="btFrom"></label>
+      <label class="opt">To <input type="date" id="btTo"></label>
+      <label class="opt"><input type="checkbox" id="bt1" checked> 1 min</label>
+      <label class="opt"><input type="checkbox" id="bt5" checked> 5 min</label>
+      <button id="btnBacktest" class="primary">Run backtest</button>
+      <span id="btStatus" class="note"></span>
+    </div>
+    <div id="btProgress" style="display:none;margin-top:10px;height:6px;border-radius:3px;
+         background:var(--grid);overflow:hidden">
+      <div id="btBar" style="height:100%;width:0;background:var(--spot);transition:width .4s"></div>
+    </div>
+    <div id="btResult" style="margin-top:12px"></div>
+    <p class="note" style="margin-bottom:0">Replays the exact engine rules against real historical
+    spot candles and real option-premium candles (expired-contracts API). Fills are approximated:
+    entry at next-candle open, stop-loss checked before target within each minute (conservative),
+    delta filter not applied historically. Needs an Upstox connection.</p>
   </section>
 
   <section class="card">
@@ -439,6 +463,89 @@ const tfChange = async () => {
   try { await post('/api/config', {timeframes: tfs}); refresh(); } catch(e){ toast(e.message); refresh(); }
 };
 $('tf1').onchange = tfChange; $('tf5').onchange = tfChange;
+
+// ---------- backtest ----------
+(() => {
+  const y = new Date(Date.now() - 864e5), f = new Date(Date.now() - 31 * 864e5);
+  $('btTo').value = y.toISOString().slice(0, 10);
+  $('btFrom').value = f.toISOString().slice(0, 10);
+})();
+let btTimer = null;
+$('btnBacktest').onclick = async () => {
+  const tfs = [];
+  if ($('bt1').checked) tfs.push(1);
+  if ($('bt5').checked) tfs.push(5);
+  if (!tfs.length) { toast('Pick at least one timeframe.'); return; }
+  try {
+    await post('/api/backtest/run',
+      {from_date: $('btFrom').value, to_date: $('btTo').value, timeframes: tfs});
+    $('btnBacktest').disabled = true;
+    $('btProgress').style.display = 'block';
+    $('btResult').innerHTML = '';
+    pollBacktest();
+  } catch(e){ toast(e.message); }
+};
+function pollBacktest(){
+  clearTimeout(btTimer);
+  fetch('/api/backtest/status').then(r => r.json()).then(s => {
+    $('btStatus').textContent = s.message || '';
+    $('btBar').style.width = (s.pct || 0) + '%';
+    if (s.state === 'running') { btTimer = setTimeout(pollBacktest, 1500); return; }
+    $('btnBacktest').disabled = false;
+    $('btProgress').style.display = 'none';
+    if (s.state === 'done' && s.result) renderBacktest(s.result);
+    else if (s.state === 'error') $('btResult').innerHTML =
+      `<span class="neg">Backtest failed: ${s.message}</span>`;
+  }).catch(() => { btTimer = setTimeout(pollBacktest, 2500); });
+}
+// resume display if a backtest already ran/is running
+fetch('/api/backtest/status').then(r => r.json()).then(s => {
+  if (s.state === 'running') { $('btnBacktest').disabled = true;
+    $('btProgress').style.display = 'block'; pollBacktest(); }
+  else if (s.state === 'done' && s.result) renderBacktest(s.result);
+}).catch(()=>{});
+
+function renderBacktest(r){
+  const tfBlock = (tf, d) => {
+    const s = d.summary, cls = s.net_rs >= 0 ? 'pos' : 'neg';
+    const reasons = Object.entries(s.exit_reasons || {})
+      .map(([k, v]) => `${k}: ${v}`).join(' · ') || '—';
+    const rows = d.trades.map(t => `<tr>
+      <td>${t.day}</td><td>${t.side}</td><td>${t.symbol}</td><td>${t.qty}</td>
+      <td>${t.entry_time}–${t.exit_time}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
+      <td class="${t.points>=0?'pos':'neg'}">${t.points>=0?'+':''}${fmt(t.points)}</td>
+      <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td>
+      <td>${t.reason}</td></tr>`).join('')
+      || '<tr><td colspan="10" class="note">No trades triggered.</td></tr>';
+    const skipped = d.skipped && d.skipped.length ? `<details style="margin-top:6px">
+      <summary class="note">${d.skipped.length} setup(s) skipped for missing data</summary>
+      <div class="note">${d.skipped.map(x => `<div>${x}</div>`).join('')}</div></details>` : '';
+    return `<div style="margin-bottom:18px">
+      <h3 style="margin:6px 0">${tf} signals — ${r.from} → ${r.to}</h3>
+      <div class="tiles" style="margin-bottom:10px">
+        <div class="tile"><div class="k">Final net P&amp;L</div>
+          <div class="v ${cls}">${rs(s.net_rs)}</div>
+          <div class="s">gross ${rs(s.gross_rs)} − charges ${rs(s.charges_rs)}</div></div>
+        <div class="tile"><div class="k">Trades</div><div class="v">${s.trades}</div>
+          <div class="s">${s.sessions} sessions · ${reasons}</div></div>
+        <div class="tile"><div class="k">Win rate</div><div class="v">${s.win_rate}%</div>
+          <div class="s">${s.wins}W / ${s.losses}L · ${s.points>=0?'+':''}${fmt(s.points)} pts</div></div>
+        <div class="tile"><div class="k">Best / worst day</div>
+          <div class="v" style="font-size:15px">
+            <span class="pos">${s.best_day ? rs(s.best_day.net_rs) : '—'}</span> /
+            <span class="neg">${s.worst_day ? rs(s.worst_day.net_rs) : '—'}</span></div>
+          <div class="s">${s.best_day ? s.best_day.day : ''} / ${s.worst_day ? s.worst_day.day : ''}</div></div>
+      </div>
+      <details><summary class="note">Trade-by-trade detail (${d.trades.length})</summary>
+        <div style="overflow-x:auto"><table><thead><tr><th>Day</th><th>Side</th><th>Contract</th>
+        <th>Qty</th><th>Time</th><th>Entry</th><th>Exit</th><th>Points</th><th>Net ₹</th>
+        <th>Reason</th></tr></thead><tbody>${rows}</tbody></table></div></details>
+      ${skipped}</div>`;
+  };
+  $('btResult').innerHTML =
+    Object.entries(r.timeframes).map(([tf, d]) => tfBlock(tf, d)).join('') +
+    `<p class="note">Assumptions: ${r.assumptions.join('; ')}.</p>`;
+}
 
 // ---------- settings ----------
 const CFG_FIELDS = [

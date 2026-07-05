@@ -149,6 +149,27 @@ class UpstoxClient:
         return await self._get(f"{V2}/option/chain",
                                params={"instrument_key": underlying_key, "expiry_date": expiry_date})
 
+    # ---------------- expired instruments (for backtesting) ----------------
+
+    async def expired_expiries(self, underlying_key: str) -> list[str]:
+        data = await self._get(f"{V2}/expired-instruments/expiries",
+                               params={"instrument_key": underlying_key})
+        if isinstance(data, dict):
+            data = data.get("expiries", [])
+        return [str(e) for e in data]
+
+    async def expired_option_contracts(self, underlying_key: str, expiry_date: str) -> list[dict]:
+        return await self._get(f"{V2}/expired-instruments/option/contract",
+                               params={"instrument_key": underlying_key,
+                                       "expiry_date": expiry_date})
+
+    async def expired_historical_candles(self, expired_instrument_key: str, interval: str,
+                                         from_date: str, to_date: str) -> list[list]:
+        key = urllib.parse.quote(expired_instrument_key, safe="")
+        data = await self._get(
+            f"{V2}/expired-instruments/historical-candle/{key}/{interval}/{to_date}/{from_date}")
+        return sorted(data.get("candles", []), key=lambda c: c[0])
+
     # ---------------- orders ----------------
 
     async def place_order(self, *, instrument_token: str, quantity: int,
