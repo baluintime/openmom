@@ -247,6 +247,7 @@ class Engine:
             "entry_price": entry, "entry_time": now.strftime("%H:%M:%S"),
             "target": round(entry + self.cfg.target_points, 2),
             "stoploss": round(entry - self.cfg.stoploss_points, 2),
+            "high": entry, "low": entry, "trail_stop": None,
             "ltp": entry, "exit_order": None, "exit_reason": None,
         }
         self._manual_squareoff = False
@@ -257,8 +258,24 @@ class Engine:
 
     # ---------------- exits ----------------
 
+    def _effective_stop(self, pos: dict) -> tuple[float, str]:
+        """Initial stop, or the trailed stop off the captured high once armed.
+        Returns (stop_price, reason_if_hit)."""
+        stop, reason = pos["stoploss"], "stoploss"
+        if (self.cfg.trailing_stop
+                and pos["high"] >= pos["entry_price"] + self.cfg.trail_activate_points):
+            trail = round(pos["high"] - self.cfg.trail_gap_points, 2)
+            if trail > stop:
+                stop, reason = trail, "trailstop"
+        pos["trail_stop"] = stop if reason == "trailstop" else None
+        return stop, reason
+
     async def _manage_position(self, now: datetime, ltp: float | None) -> None:
         pos = self.position
+        if ltp is not None and ltp > 0:  # capture the excursion since entry
+            pos["high"] = max(pos["high"], ltp)
+            pos["low"] = min(pos["low"], ltp)
+        stop_price, stop_reason = self._effective_stop(pos)
         exit_order: BrokerOrder | None = pos.get("exit_order")
 
         if exit_order is not None:
@@ -269,25 +286,25 @@ class Engine:
             if exit_order.status in (REJECTED, CANCELLED):
                 pos["exit_order"] = None  # will re-trigger below
             elif (ltp is not None and exit_order.order_type == "LIMIT"
-                  and ltp <= pos["stoploss"]):
+                  and ltp <= stop_price):
                 # resting target order while price collapsed to the stop: flip to MARKET
                 try:
                     await self.broker().cancel(exit_order)
                 except UpstoxError:
                     return
                 pos["exit_order"] = None
-                pos["exit_reason"] = "stoploss"
+                pos["exit_reason"] = stop_reason
 
         if pos.get("exit_order") is None:
             reason, order_type, price = pos.get("exit_reason"), None, 0.0
-            if reason == "stoploss":
+            if reason in ("stoploss", "trailstop"):
                 order_type = "MARKET"
             elif self._manual_squareoff:
                 reason, order_type = "manual", "MARKET"
             elif self.risk.square_off_due(now, self.cfg) or not self.risk.market_hours(now):
                 reason, order_type = "squareoff", "MARKET"
-            elif ltp is not None and ltp <= pos["stoploss"]:
-                reason, order_type = "stoploss", "MARKET"
+            elif ltp is not None and ltp <= stop_price:
+                reason, order_type = stop_reason, "MARKET"
             elif ltp is not None and ltp >= pos["target"]:
                 reason, order_type, price = "target", "LIMIT", pos["target"]
             if order_type is None:
@@ -318,6 +335,8 @@ class Engine:
             "qty": pos["qty"], "entry_time": pos["entry_time"],
             "exit_time": now.strftime("%H:%M:%S"),
             "entry": round(pos["entry_price"], 2), "exit": round(exit_price, 2),
+            "high": round(max(pos["high"], exit_price), 2),
+            "low": round(min(pos["low"], exit_price), 2),
             "points": round(pnl_points, 2), "gross_rs": round(gross, 2),
             "charges_rs": round(charges, 2), "net_rs": round(gross - charges, 2),
             "reason": reason,
@@ -344,6 +363,8 @@ class Engine:
                 "qty": p["qty"], "tf": f"{p['tf']}m",
                 "entry": round(p["entry_price"], 2), "ltp": round(p.get("ltp") or 0, 2),
                 "target": p["target"], "stoploss": p["stoploss"],
+                "high": round(p["high"], 2), "low": round(p["low"], 2),
+                "trail_stop": p.get("trail_stop"),
                 "entry_time": p["entry_time"],
                 "unrealized_points": round(unreal_pts, 2),
                 "unrealized_rs": round(unreal_pts * p["qty"], 2),

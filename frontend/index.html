@@ -168,8 +168,8 @@
     <div style="overflow-x:auto">
     <table><thead><tr>
       <th>TF</th><th>Mode</th><th>Contract</th><th>Qty</th><th>Entry</th><th>Exit</th>
-      <th>Points</th><th>Gross ₹</th><th>Charges ₹</th><th>Net ₹</th><th>Reason</th><th>Time</th>
-    </tr></thead><tbody id="tradeRows"><tr><td colspan="12" class="note">No trades yet today.</td></tr></tbody></table>
+      <th>High / Low</th><th>Points</th><th>Gross ₹</th><th>Charges ₹</th><th>Net ₹</th><th>Reason</th><th>Time</th>
+    </tr></thead><tbody id="tradeRows"><tr><td colspan="13" class="note">No trades yet today.</td></tr></tbody></table>
     </div>
   </section>
 
@@ -324,7 +324,9 @@ function renderPosition(s){
     <span class="k">Contract</span><span><b>${p.symbol}</b> (${p.side} ${p.strike}, exp ${p.expiry})</span>
     <span class="k">Qty / TF</span><span>${p.qty} · ${p.tf} signal · entered ${p.entry_time}</span>
     <span class="k">Entry / LTP</span><span>₹${fmt(p.entry)} → ₹${fmt(p.ltp)}</span>
-    <span class="k">Target / Stop</span><span>₹${fmt(p.target)} / ₹${fmt(p.stoploss)}</span>
+    <span class="k">High / Low</span><span>₹${fmt(p.high)} / ₹${fmt(p.low)} since entry</span>
+    <span class="k">Target / Stop</span><span>₹${fmt(p.target)} / ₹${fmt(p.stoploss)}${
+      p.trail_stop ? ` · <b>trailing @ ₹${fmt(p.trail_stop)}</b>` : ''}</span>
     <span class="k">Unrealized</span><span class="${cls}"><b>${p.unrealized_points>=0?'+':''}${fmt(p.unrealized_points)} pts (${rs(p.unrealized_rs)})</b></span>
     ${p.exiting ? `<span class="k">Exiting</span><span>${p.exiting} order in flight…</span>` : ''}
   </div>`;
@@ -344,16 +346,20 @@ function renderGates(s){
     g(r.consecutive_losses < c.max_consecutive_losses,
       `Consecutive stop-losses: ${r.consecutive_losses}/${c.max_consecutive_losses}`) +
     g(true, `Flat-EMA filter: ${c.flat_ema_filter ? 'on' : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
-    g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`);
+    g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
+    g(true, `Trailing stop: ${c.trailing_stop
+        ? `on — arms at +${c.trail_activate_points} pts, trails high by ${c.trail_gap_points} pts`
+        : 'off'}`);
 }
 
 function renderTrades(s){
   const tb = $('tradeRows');
   if (!s.trades.length) {
-    tb.innerHTML = '<tr><td colspan="12" class="note">No trades yet today.</td></tr>'; return; }
+    tb.innerHTML = '<tr><td colspan="13" class="note">No trades yet today.</td></tr>'; return; }
   tb.innerHTML = s.trades.map(t => `<tr>
     <td>${t.tf}</td><td>${t.mode}</td><td>${t.symbol}</td><td>${t.qty}</td>
     <td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
+    <td>${t.high != null ? fmt(t.high) + ' / ' + fmt(t.low) : '—'}</td>
     <td class="${t.points>=0?'pos':'neg'}">${t.points>=0?'+':''}${fmt(t.points)}</td>
     <td>${fmt(t.gross_rs)}</td><td>${fmt(t.charges_rs)}</td>
     <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td>
@@ -513,10 +519,11 @@ function renderBacktest(r){
     const rows = d.trades.map(t => `<tr>
       <td>${t.day}</td><td>${t.side}</td><td>${t.symbol}</td><td>${t.qty}</td>
       <td>${t.entry_time}–${t.exit_time}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
+      <td>${t.high != null ? fmt(t.high) + ' / ' + fmt(t.low) : '—'}</td>
       <td class="${t.points>=0?'pos':'neg'}">${t.points>=0?'+':''}${fmt(t.points)}</td>
       <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td>
       <td>${t.reason}</td></tr>`).join('')
-      || '<tr><td colspan="10" class="note">No trades triggered.</td></tr>';
+      || '<tr><td colspan="11" class="note">No trades triggered.</td></tr>';
     const skipped = d.skipped && d.skipped.length ? `<details style="margin-top:6px">
       <summary class="note">${d.skipped.length} setup(s) skipped for missing data</summary>
       <div class="note">${d.skipped.map(x => `<div>${x}</div>`).join('')}</div></details>` : '';
@@ -538,8 +545,8 @@ function renderBacktest(r){
       </div>
       <details><summary class="note">Trade-by-trade detail (${d.trades.length})</summary>
         <div style="overflow-x:auto"><table><thead><tr><th>Day</th><th>Side</th><th>Contract</th>
-        <th>Qty</th><th>Time</th><th>Entry</th><th>Exit</th><th>Points</th><th>Net ₹</th>
-        <th>Reason</th></tr></thead><tbody>${rows}</tbody></table></div></details>
+        <th>Qty</th><th>Time</th><th>Entry</th><th>Exit</th><th>High / Low</th><th>Points</th>
+        <th>Net ₹</th><th>Reason</th></tr></thead><tbody>${rows}</tbody></table></div></details>
       ${skipped}</div>`;
   };
   $('btResult').innerHTML =
@@ -551,6 +558,8 @@ function renderBacktest(r){
 const CFG_FIELDS = [
   ['ema_period','EMA period','number'], ['decisive_points','Decisive close (pts)','number'],
   ['target_points','Target (+pts)','number'], ['stoploss_points','Stop-loss (−pts)','number'],
+  ['trail_activate_points','Trail arms at (+pts)','number'],
+  ['trail_gap_points','Trail gap (pts)','number'],
   ['lots','Lots','number'], ['premium_band_low','Premium band low ₹','number'],
   ['premium_band_high','Premium band high ₹','number'], ['delta_low','Delta low','number'],
   ['delta_high','Delta high','number'], ['max_trades_per_day','Max trades/day','number'],
@@ -568,6 +577,8 @@ function buildCfg(){
   $('cfgGrid').innerHTML = CFG_FIELDS.map(([k,label,type]) =>
     `<label>${label}<input data-k="${k}" type="${type}" step="any"
        value="${state.config[k]}"></label>`).join('') +
+    `<label>Trailing stop<br><input data-k="trailing_stop" type="checkbox"
+       ${state.config.trailing_stop?'checked':''}></label>` +
     `<label>Flat-EMA filter<br><input data-k="flat_ema_filter" type="checkbox"
        ${state.config.flat_ema_filter?'checked':''}></label>` +
     `<label>Stop after target<br><input data-k="stop_after_target" type="checkbox"

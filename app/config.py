@@ -62,6 +62,12 @@ class StrategyConfig:
     # Risk-to-reward (premium points)
     target_points: float = 4.0
     stoploss_points: float = 3.0
+    # Trailing stop: once the premium is trail_activate_points above entry,
+    # the stop trails the captured high by trail_gap_points (only ever rises,
+    # never below the initial stop-loss)
+    trailing_stop: bool = True
+    trail_activate_points: float = 2.0
+    trail_gap_points: float = 2.0
     # Session overlays
     max_trades_per_day: int = 2
     stop_after_target: bool = True
@@ -89,6 +95,8 @@ class StrategyConfig:
             raise ValueError("lots must be >= 1")
         if self.target_points <= 0 or self.stoploss_points <= 0:
             raise ValueError("target/stoploss points must be positive")
+        if self.trail_gap_points <= 0 or self.trail_activate_points < 0:
+            raise ValueError("trail gap must be positive and activation non-negative")
 
 
 def load_strategy_config() -> StrategyConfig:

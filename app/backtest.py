@@ -107,6 +107,8 @@ class Backtester:
             "params": {
                 "ema_period": cfg.ema_period, "decisive_points": cfg.decisive_points,
                 "target_points": cfg.target_points, "stoploss_points": cfg.stoploss_points,
+                "trailing_stop": [cfg.trail_activate_points, cfg.trail_gap_points]
+                                 if cfg.trailing_stop else None,
                 "lots": cfg.lots, "premium_band": [cfg.premium_band_low, cfg.premium_band_high],
                 "max_trades_per_day": cfg.max_trades_per_day,
                 "stop_after_target": cfg.stop_after_target,
@@ -119,6 +121,7 @@ class Backtester:
             "assumptions": [
                 "Entries fill at the open of the candle after the signal candle",
                 "Stop-loss checked before target within each 1-min candle (conservative)",
+                "Trailing stop steps at candle granularity, armed only by prior candles' highs",
                 "Delta filter not applied (historical greeks unavailable); premium-band + ATM/ITM selection",
                 f"₹{cfg.round_trip_charges:.0f} charges per round trip",
             ],
@@ -313,24 +316,33 @@ class Backtester:
                 candidates, key=lambda c: abs(float(c[0]["strike_price"]) - atm))
 
         target = entry + cfg.target_points
-        sl = entry - cfg.stoploss_points
+        init_sl = entry - cfg.stoploss_points
         square_ts = datetime.combine(day, _parse_hhmm(cfg.square_off_at), tzinfo=TZ)
 
+        # eff_sl trails the captured high; it is recomputed only from *prior*
+        # candles' highs (intra-candle ordering is unknowable -> conservative)
+        high = low = entry
+        eff_sl = init_sl
         exit_price = exit_ts = None
         reason = "eod"
         for c in candles[k:]:
             if c.ts >= square_ts:
                 exit_price, exit_ts, reason = c.open, c.ts, "squareoff"
                 break
-            if c.low <= sl:            # conservative: stop before target in-candle
-                exit_price, exit_ts, reason = sl, c.ts, "stoploss"
+            if c.low <= eff_sl:        # conservative: stop before target in-candle
+                exit_price, exit_ts = eff_sl, c.ts
+                reason = "trailstop" if eff_sl > init_sl else "stoploss"
                 break
             if c.high >= target:
                 exit_price, exit_ts, reason = target, c.ts, "target"
                 break
+            high, low = max(high, c.high), min(low, c.low)
+            if cfg.trailing_stop and high >= entry + cfg.trail_activate_points:
+                eff_sl = max(eff_sl, round(high - cfg.trail_gap_points, 2))
         if exit_price is None:
             last = candles[-1]
             exit_price, exit_ts = last.close, last.ts
+        high, low = max(high, exit_price), min(low, exit_price)
 
         lot_size = int(contract.get("lot_size") or 75)
         qty = cfg.lots * lot_size
@@ -345,6 +357,7 @@ class Backtester:
             "entry_time": entry_ts.strftime("%H:%M"),
             "exit_time": exit_ts.strftime("%H:%M"),
             "entry": round(entry, 2), "exit": round(exit_price, 2),
+            "high": round(high, 2), "low": round(low, 2),
             "points": round(points, 2),
             "gross_rs": round(gross, 2),
             "charges_rs": round(cfg.round_trip_charges, 2),
