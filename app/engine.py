@@ -94,8 +94,13 @@ class Engine:
     # ---------------- logging / persistence ----------------
 
     def log(self, kind: str, msg: str) -> None:
-        self.events.appendleft({
-            "ts": datetime.now(TZ).strftime("%H:%M:%S"), "kind": kind, "msg": msg})
+        now = datetime.now(TZ)
+        self.events.appendleft({"ts": now.strftime("%H:%M:%S"), "kind": kind, "msg": msg})
+        try:  # persistent copy, one file per day
+            with (DATA_DIR / f"events-{now:%Y-%m-%d}.log").open("a", encoding="utf-8") as f:
+                f.write(f"{now:%H:%M:%S} [{kind}] {msg}\n")
+        except OSError:
+            pass
 
     def _load_today_trades(self) -> list[dict]:
         today = datetime.now(TZ).strftime("%Y-%m-%d")
