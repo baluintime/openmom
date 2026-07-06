@@ -34,7 +34,7 @@ with a web dashboard frontend.
 | Target cutoff | First target hit → terminal deactivated for the day |
 | Double-loss cutoff | 2 consecutive stop-losses → done for the day |
 | Mid-day block | No entries 10:30–13:00 IST |
-| Flat-EMA filter | Signal skipped if the 9-EMA is flat (< 3 pts move over 3 candles) |
+| Flat-EMA filter | Signal skipped if the 9-EMA is flat: < 3 pts move over 3 candles on the 5-min chart, scaled by timeframe (< 0.6 pts on 1-min) |
 | Session guard | No entries after 15:00; forced square-off at 15:15 IST |
 | Cost model | ₹56 round-trip charges applied to net P&L reporting |
 

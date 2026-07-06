@@ -345,7 +345,10 @@ function renderGates(s){
                                   : 'Target cutoff (stop after first target)') +
     g(r.consecutive_losses < c.max_consecutive_losses,
       `Consecutive stop-losses: ${r.consecutive_losses}/${c.max_consecutive_losses}`) +
-    g(true, `Flat-EMA filter: ${c.flat_ema_filter ? 'on' : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
+    g(true, `Flat-EMA filter: ${c.flat_ema_filter
+        ? `on — EMA must move ≥ ${fmt(c.flat_ema_points * 1 / 5, 1)} pts (1m) / ` +
+          `${fmt(c.flat_ema_points, 1)} pts (5m) over ${c.flat_ema_lookback} candles`
+        : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
     g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
     g(true, `Trailing stop: ${c.trailing_stop
         ? `on — arms at +${c.trail_activate_points} pts, trails high by ${c.trail_gap_points} pts`

@@ -248,8 +248,9 @@ class Backtester:
                 if cfg.midday_block and blk_a <= t < blk_b:
                     continue
                 if cfg.flat_ema_filter:
+                    # threshold defined on the 5-min chart, scaled per timeframe
                     ref = ema[i - cfg.flat_ema_lookback] if i - cfg.flat_ema_lookback >= 0 else None
-                    if ref is not None and abs(cur_e - ref) < cfg.flat_ema_points:
+                    if ref is not None and abs(cur_e - ref) < cfg.flat_ema_points * tf / 5.0:
                         continue
 
                 trade = await self._simulate_trade(cfg, tf, side, day, entry_ts, cur_c, skipped)

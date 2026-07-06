@@ -173,7 +173,7 @@ class Engine:
                     await self._check_signal(now, feed, tf)
 
     async def _check_signal(self, now: datetime, feed: SpotFeed, tf: int) -> None:
-        signal, flat = feed.evaluate_signal(self.cfg)
+        signal, flat_info = feed.evaluate_signal(self.cfg)
         if signal is None:
             return
         key = signal.candle_ts.isoformat()
@@ -184,12 +184,14 @@ class Engine:
         label = (f"{tf}m candle {signal.candle_ts.strftime('%H:%M')} closed "
                  f"{'above' if signal.side == 'CE' else 'below'} 9-EMA "
                  f"(close {signal.close:.2f} / EMA {signal.ema:.2f})")
-        if flat:
-            self.log("signal", f"{label} — SKIPPED: flat 9-EMA (institutional block filter)")
-            return
         reason = self.risk.entry_gate(now, self.cfg)
         if reason:
             self.log("signal", f"{label} — SKIPPED: {reason}")
+            return
+        if flat_info["flat"]:
+            self.log("signal", f"{label} — SKIPPED: flat 9-EMA "
+                     f"(moved {flat_info['move']:.2f} pts over "
+                     f"{self.cfg.flat_ema_lookback} candles, need ≥ {flat_info['needed']:.2f})")
             return
 
         self.log("signal", f"{label} — {signal.side} entry trigger")

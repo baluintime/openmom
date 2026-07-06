@@ -44,8 +44,10 @@ class StrategyConfig:
     ema_period: int = 9
     # "Decisive" close: candle close must clear the 9-EMA by this many index points
     decisive_points: float = 2.0
-    # Flat-EMA filter (Institutional Block Filter): skip if EMA moved less than
-    # flat_ema_points over flat_ema_lookback completed candles
+    # Flat-EMA filter (Institutional Block Filter): skip if the EMA moved less
+    # than flat_ema_points over flat_ema_lookback completed candles. The points
+    # value is defined on the 5-min chart and scaled by timeframe/5 elsewhere
+    # (e.g. 3.0 here means 0.6 pts over 3 candles on the 1-min chart)
     flat_ema_filter: bool = True
     flat_ema_points: float = 3.0
     flat_ema_lookback: int = 3

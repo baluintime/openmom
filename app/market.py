@@ -101,26 +101,35 @@ class SpotFeed:
             self.last_processed_ts = completed_today[-1].ts
         return new
 
-    def evaluate_signal(self, cfg: StrategyConfig) -> tuple[Signal | None, bool]:
-        """Signal on the latest completed candle, plus a flat-EMA flag.
+    def flat_threshold(self, cfg: StrategyConfig) -> float:
+        """flat_ema_points is defined on the 5-min chart (per the spec) and
+        scaled linearly for other timeframes — an EMA's slope per candle is
+        proportional to the candle duration, so an unscaled threshold would
+        veto nearly every 1-min crossover."""
+        return cfg.flat_ema_points * self.tf / 5.0
+
+    def evaluate_signal(self, cfg: StrategyConfig) -> tuple[Signal | None, dict]:
+        """Signal on the latest completed candle, plus flat-EMA measurements
+        {flat, move, needed}.
 
         CE: previous close at/below its EMA, latest close decisively above.
         PE: mirror image below.
         """
+        flat_info = {"flat": False, "move": None, "needed": self.flat_threshold(cfg)}
         closes = [c.close for c in self.candles]
         ema = ema_series(closes, cfg.ema_period)
         if len(closes) < cfg.ema_period + max(2, cfg.flat_ema_lookback + 1):
-            return None, False
+            return None, flat_info
         prev_c, cur_c = closes[-2], closes[-1]
         prev_e, cur_e = ema[-2], ema[-1]
         if prev_e is None or cur_e is None:
-            return None, False
+            return None, flat_info
 
-        flat = False
         if cfg.flat_ema_filter:
             ref = ema[-1 - cfg.flat_ema_lookback]
-            if ref is not None and abs(cur_e - ref) < cfg.flat_ema_points:
-                flat = True
+            if ref is not None:
+                flat_info["move"] = abs(cur_e - ref)
+                flat_info["flat"] = flat_info["move"] < flat_info["needed"]
 
         side = None
         if prev_c <= prev_e and cur_c > cur_e + cfg.decisive_points:
@@ -128,10 +137,10 @@ class SpotFeed:
         elif prev_c >= prev_e and cur_c < cur_e - cfg.decisive_points:
             side = "PE"
         if side is None:
-            return None, flat
+            return None, flat_info
 
         return Signal(side=side, timeframe=self.tf, candle_ts=self.candles[-1].ts,
-                      close=cur_c, ema=cur_e), flat
+                      close=cur_c, ema=cur_e), flat_info
 
     def snapshot(self, points: int = 75) -> dict:
         cs = self.candles[-points:]
