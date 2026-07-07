@@ -64,10 +64,14 @@ class StrategyConfig:
     # Risk-to-reward (premium points)
     target_points: float = 4.0
     stoploss_points: float = 3.0
-    # Trailing stop: once the premium is trail_activate_points above entry,
-    # the stop trails the captured high by trail_gap_points (only ever rises,
-    # never below the initial stop-loss)
+    # Trailing exit. Two modes:
+    #  "ema"    - exit when the NIFTY spot touches the signal timeframe's 9-EMA
+    #             (trend over); target and the initial hard stop still apply
+    #  "points" - premium trail: arms once trail_activate_points above entry,
+    #             then trails the captured high by trail_gap_points (only ever
+    #             rises, never below the initial stop-loss)
     trailing_stop: bool = True
+    trail_mode: str = "ema"
     trail_activate_points: float = 2.0
     trail_gap_points: float = 2.0
     # Session overlays
@@ -97,6 +101,8 @@ class StrategyConfig:
             raise ValueError("lots must be >= 1")
         if self.target_points <= 0 or self.stoploss_points <= 0:
             raise ValueError("target/stoploss points must be positive")
+        if self.trail_mode not in ("ema", "points"):
+            raise ValueError("trail_mode must be 'ema' or 'points'")
         if self.trail_gap_points <= 0 or self.trail_activate_points < 0:
             raise ValueError("trail gap must be positive and activation non-negative")
 

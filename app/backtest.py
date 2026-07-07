@@ -107,8 +107,8 @@ class Backtester:
             "params": {
                 "ema_period": cfg.ema_period, "decisive_points": cfg.decisive_points,
                 "target_points": cfg.target_points, "stoploss_points": cfg.stoploss_points,
-                "trailing_stop": [cfg.trail_activate_points, cfg.trail_gap_points]
-                                 if cfg.trailing_stop else None,
+                "trailing_stop": (cfg.trail_mode if cfg.trailing_stop else None),
+                "trail_points": [cfg.trail_activate_points, cfg.trail_gap_points],
                 "lots": cfg.lots, "premium_band": [cfg.premium_band_low, cfg.premium_band_high],
                 "max_trades_per_day": cfg.max_trades_per_day,
                 "stop_after_target": cfg.stop_after_target,
@@ -121,7 +121,8 @@ class Backtester:
             "assumptions": [
                 "Entries fill at the open of the candle after the signal candle",
                 "Stop-loss checked before target within each 1-min candle (conservative)",
-                "Trailing stop steps at candle granularity, armed only by prior candles' highs",
+                "EMA-touch exit evaluated on completed spot candles, exiting at the next minute's open",
+                "Points-mode trailing steps at candle granularity, armed only by prior candles' highs",
                 "Delta filter not applied (historical greeks unavailable); premium-band + ATM/ITM selection",
                 f"₹{cfg.round_trip_charges:.0f} charges per round trip",
             ],
@@ -253,7 +254,8 @@ class Backtester:
                     if ref is not None and abs(cur_e - ref) < cfg.flat_ema_points * tf / 5.0:
                         continue
 
-                trade = await self._simulate_trade(cfg, tf, side, day, entry_ts, cur_c, skipped)
+                trade = await self._simulate_trade(cfg, tf, side, day, entry_ts, cur_c,
+                                                   skipped, spot, ema, i + 1)
                 if trade is None:
                     continue
                 trades_today += 1
@@ -269,8 +271,8 @@ class Backtester:
         return self._summarize(trades, skipped, days)
 
     async def _simulate_trade(self, cfg: StrategyConfig, tf: int, side: str, day: date,
-                              entry_ts: datetime, spot_close: float,
-                              skipped: list[str]) -> dict | None:
+                              entry_ts: datetime, spot_close: float, skipped: list[str],
+                              spot: list, ema: list, entry_idx: int) -> dict | None:
         day_s = day.isoformat()
         expiry = next((e for e in self._expiries if e >= day_s), None)
         if expiry is None:
@@ -320,8 +322,16 @@ class Backtester:
         init_sl = entry - cfg.stoploss_points
         square_ts = datetime.combine(day, _parse_hhmm(cfg.square_off_at), tzinfo=TZ)
 
-        # eff_sl trails the captured high; it is recomputed only from *prior*
-        # candles' highs (intra-candle ordering is unknowable -> conservative)
+        # In "ema" trail mode the exit fires when a completed spot candle of the
+        # signal timeframe touches its 9-EMA (CE: candle low, PE: candle high);
+        # the position exits at the open of the next option minute. In "points"
+        # mode eff_sl trails the captured high, recomputed only from *prior*
+        # candles' highs (intra-candle ordering is unknowable -> conservative).
+        ema_trail = cfg.trailing_stop and cfg.trail_mode == "ema"
+        points_trail = cfg.trailing_stop and cfg.trail_mode == "points"
+        tf_delta = timedelta(minutes=tf)
+        spot_j = entry_idx
+        ema_touch_from: datetime | None = None
         high = low = entry
         eff_sl = init_sl
         exit_price = exit_ts = None
@@ -329,6 +339,20 @@ class Backtester:
         for c in candles[k:]:
             if c.ts >= square_ts:
                 exit_price, exit_ts, reason = c.open, c.ts, "squareoff"
+                break
+            if ema_trail and ema_touch_from is None:
+                # consider spot candles completed by this option minute
+                while (spot_j < len(spot) and spot[spot_j].ts.date() == day
+                       and spot[spot_j].ts + tf_delta <= c.ts):
+                    se = ema[spot_j]
+                    sc = spot[spot_j]
+                    if se is not None and ((side == "CE" and sc.low <= se)
+                                           or (side == "PE" and sc.high >= se)):
+                        ema_touch_from = sc.ts + tf_delta
+                        break
+                    spot_j += 1
+            if ema_touch_from is not None and c.ts >= ema_touch_from:
+                exit_price, exit_ts, reason = c.open, c.ts, "ema_touch"
                 break
             if c.low <= eff_sl:        # conservative: stop before target in-candle
                 exit_price, exit_ts = eff_sl, c.ts
@@ -338,7 +362,7 @@ class Backtester:
                 exit_price, exit_ts, reason = target, c.ts, "target"
                 break
             high, low = max(high, c.high), min(low, c.low)
-            if cfg.trailing_stop and high >= entry + cfg.trail_activate_points:
+            if points_trail and high >= entry + cfg.trail_activate_points:
                 eff_sl = max(eff_sl, round(high - cfg.trail_gap_points, 2))
         if exit_price is None:
             last = candles[-1]

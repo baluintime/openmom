@@ -142,7 +142,7 @@ async def set_config(body: dict = Body(...)):
         "flat_ema_points", "flat_ema_lookback", "lots", "capital",
         "max_risk_capital_per_trade", "premium_band_low", "premium_band_high",
         "delta_low", "delta_high", "max_itm_strikes", "target_points",
-        "stoploss_points", "trailing_stop", "trail_activate_points",
+        "stoploss_points", "trailing_stop", "trail_mode", "trail_activate_points",
         "trail_gap_points", "max_trades_per_day", "stop_after_target",
         "max_consecutive_losses", "midday_block", "midday_block_start",
         "midday_block_end", "no_entries_after", "square_off_at",

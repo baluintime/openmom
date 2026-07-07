@@ -326,7 +326,8 @@ function renderPosition(s){
     <span class="k">Entry / LTP</span><span>₹${fmt(p.entry)} → ₹${fmt(p.ltp)}</span>
     <span class="k">High / Low</span><span>₹${fmt(p.high)} / ₹${fmt(p.low)} since entry</span>
     <span class="k">Target / Stop</span><span>₹${fmt(p.target)} / ₹${fmt(p.stoploss)}${
-      p.trail_stop ? ` · <b>trailing @ ₹${fmt(p.trail_stop)}</b>` : ''}</span>
+      p.trail_stop ? ` · <b>trailing @ ₹${fmt(p.trail_stop)}</b>` : ''}${
+      p.ema_level != null ? ` · <b>exits if spot touches 9-EMA (${fmt(p.ema_level)})</b>` : ''}</span>
     <span class="k">Unrealized</span><span class="${cls}"><b>${p.unrealized_points>=0?'+':''}${fmt(p.unrealized_points)} pts (${rs(p.unrealized_rs)})</b></span>
     ${p.exiting ? `<span class="k">Exiting</span><span>${p.exiting} order in flight…</span>` : ''}
   </div>`;
@@ -350,9 +351,10 @@ function renderGates(s){
           `${fmt(c.flat_ema_points, 1)} pts (5m) over ${c.flat_ema_lookback} candles`
         : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
     g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
-    g(true, `Trailing stop: ${c.trailing_stop
-        ? `on — arms at +${c.trail_activate_points} pts, trails high by ${c.trail_gap_points} pts`
-        : 'off'}`);
+    g(true, `Trailing exit: ${!c.trailing_stop ? 'off'
+        : c.trail_mode === 'ema'
+          ? 'on — exit when spot touches the 9-EMA (target & hard stop still apply)'
+          : `on — arms at +${c.trail_activate_points} pts, trails high by ${c.trail_gap_points} pts`}`);
 }
 
 function renderTrades(s){
@@ -580,7 +582,12 @@ function buildCfg(){
   $('cfgGrid').innerHTML = CFG_FIELDS.map(([k,label,type]) =>
     `<label>${label}<input data-k="${k}" type="${type}" step="any"
        value="${state.config[k]}"></label>`).join('') +
-    `<label>Trailing stop<br><input data-k="trailing_stop" type="checkbox"
+    `<label>Trail mode<select data-k="trail_mode" style="width:100%;padding:5px 8px;font:inherit;
+        border:1px solid var(--border);border-radius:6px;background:var(--page);color:var(--ink)">
+       <option value="ema" ${state.config.trail_mode==='ema'?'selected':''}>EMA touch (spot)</option>
+       <option value="points" ${state.config.trail_mode==='points'?'selected':''}>Points gap (premium)</option>
+     </select></label>` +
+    `<label>Trailing exit<br><input data-k="trailing_stop" type="checkbox"
        ${state.config.trailing_stop?'checked':''}></label>` +
     `<label>Flat-EMA filter<br><input data-k="flat_ema_filter" type="checkbox"
        ${state.config.flat_ema_filter?'checked':''}></label>` +
@@ -592,7 +599,7 @@ function buildCfg(){
 document.querySelector('details.cfg').addEventListener('toggle', buildCfg);
 $('btnSaveCfg').onclick = async () => {
   const body = {};
-  document.querySelectorAll('#cfgGrid input').forEach(inp => {
+  document.querySelectorAll('#cfgGrid input, #cfgGrid select').forEach(inp => {
     const k = inp.dataset.k;
     body[k] = inp.type === 'checkbox' ? inp.checked
             : inp.type === 'number' ? Number(inp.value) : inp.value;

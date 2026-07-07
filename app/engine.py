@@ -266,10 +266,10 @@ class Engine:
     # ---------------- exits ----------------
 
     def _effective_stop(self, pos: dict) -> tuple[float, str]:
-        """Initial stop, or the trailed stop off the captured high once armed.
-        Returns (stop_price, reason_if_hit)."""
+        """Initial stop, or (in points mode) the trailed stop off the captured
+        high once armed. Returns (stop_price, reason_if_hit)."""
         stop, reason = pos["stoploss"], "stoploss"
-        if (self.cfg.trailing_stop
+        if (self.cfg.trailing_stop and self.cfg.trail_mode == "points"
                 and pos["high"] >= pos["entry_price"] + self.cfg.trail_activate_points):
             trail = round(pos["high"] - self.cfg.trail_gap_points, 2)
             if trail > stop:
@@ -277,12 +277,29 @@ class Engine:
         pos["trail_stop"] = stop if reason == "trailstop" else None
         return stop, reason
 
+    def _ema_touched(self, pos: dict) -> bool:
+        """EMA-touch exit: true when the spot has come back to the 9-EMA of
+        the timeframe that generated the trade (CE: spot at/below the EMA,
+        PE: spot at/above it)."""
+        pos["ema_level"] = None
+        if not (self.cfg.trailing_stop and self.cfg.trail_mode == "ema"):
+            return False
+        feed = self.feeds.get(pos["tf"])
+        if feed is None or not feed.ema or feed.ema[-1] is None or not self.spot_ltp:
+            return False
+        ema = feed.ema[-1]
+        pos["ema_level"] = round(ema, 2)
+        if pos["option"]["side"] == "CE":
+            return self.spot_ltp <= ema
+        return self.spot_ltp >= ema
+
     async def _manage_position(self, now: datetime, ltp: float | None) -> None:
         pos = self.position
         if ltp is not None and ltp > 0:  # capture the excursion since entry
             pos["high"] = max(pos["high"], ltp)
             pos["low"] = min(pos["low"], ltp)
         stop_price, stop_reason = self._effective_stop(pos)
+        ema_touched = self._ema_touched(pos)
         exit_order: BrokerOrder | None = pos.get("exit_order")
 
         if exit_order is not None:
@@ -292,19 +309,21 @@ class Engine:
                 return
             if exit_order.status in (REJECTED, CANCELLED):
                 pos["exit_order"] = None  # will re-trigger below
-            elif (ltp is not None and exit_order.order_type == "LIMIT"
-                  and ltp <= stop_price):
-                # resting target order while price collapsed to the stop: flip to MARKET
+            elif (exit_order.order_type == "LIMIT"
+                  and ((ltp is not None and ltp <= stop_price) or ema_touched)):
+                # resting target order while the exit condition hit: flip to MARKET
                 try:
                     await self.broker().cancel(exit_order)
                 except UpstoxError:
                     return
                 pos["exit_order"] = None
-                pos["exit_reason"] = stop_reason
+                pos["exit_reason"] = ("ema_touch" if ema_touched
+                                      and not (ltp is not None and ltp <= stop_price)
+                                      else stop_reason)
 
         if pos.get("exit_order") is None:
             reason, order_type, price = pos.get("exit_reason"), None, 0.0
-            if reason in ("stoploss", "trailstop"):
+            if reason in ("stoploss", "trailstop", "ema_touch"):
                 order_type = "MARKET"
             elif self._manual_squareoff:
                 reason, order_type = "manual", "MARKET"
@@ -312,6 +331,8 @@ class Engine:
                 reason, order_type = "squareoff", "MARKET"
             elif ltp is not None and ltp <= stop_price:
                 reason, order_type = stop_reason, "MARKET"
+            elif ema_touched:
+                reason, order_type = "ema_touch", "MARKET"
             elif ltp is not None and ltp >= pos["target"]:
                 reason, order_type, price = "target", "LIMIT", pos["target"]
             if order_type is None:
@@ -372,6 +393,7 @@ class Engine:
                 "target": p["target"], "stoploss": p["stoploss"],
                 "high": round(p["high"], 2), "low": round(p["low"], 2),
                 "trail_stop": p.get("trail_stop"),
+                "ema_level": p.get("ema_level"),
                 "entry_time": p["entry_time"],
                 "unrealized_points": round(unreal_pts, 2),
                 "unrealized_rs": round(unreal_pts * p["qty"], 2),

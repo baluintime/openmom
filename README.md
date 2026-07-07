@@ -28,7 +28,7 @@ with a web dashboard frontend.
 | Entry orders | **LIMIT** (LTP + small buffer); auto-cancelled if unfilled in 30 s |
 | Target | +4 premium points (LIMIT exit) |
 | Stop-loss | −3 premium points (MARKET exit) |
-| Trailing stop | Arms once the premium is +2 pts above entry, then trails the captured high by 2 pts (only rises, never below the initial stop; MARKET exit) |
+| Trailing exit | Default **EMA-touch**: exit the moment the spot comes back to the signal timeframe's 9-EMA (trend over); the +4 target and −3 hard stop still apply. Alternative **points** mode: premium trails the captured high by 2 pts once +2 pts in profit. Both exit as MARKET |
 | High/Low capture | The premium's high and low since entry are tracked live, shown on the position card and recorded per trade (live and backtest) |
 | Max trades/day | 2 setups |
 | Target cutoff | First target hit → terminal deactivated for the day |
