@@ -278,20 +278,22 @@ class Engine:
         return stop, reason
 
     def _ema_touched(self, pos: dict) -> bool:
-        """EMA-touch exit: true when the spot has come back to the 9-EMA of
-        the timeframe that generated the trade (CE: spot at/below the EMA,
-        PE: spot at/above it)."""
+        """EMA-touch exit, close-confirmed: true only when the latest
+        *completed* candle of the trade's timeframe CLOSED at/across its
+        9-EMA (CE: close at/below, PE: close at/above). Ticks that pierce
+        the EMA while a candle is still painting do not exit."""
         pos["ema_level"] = None
         if not (self.cfg.trailing_stop and self.cfg.trail_mode == "ema"):
             return False
         feed = self.feeds.get(pos["tf"])
-        if feed is None or not feed.ema or feed.ema[-1] is None or not self.spot_ltp:
+        if feed is None or not feed.candles or not feed.ema or feed.ema[-1] is None:
             return False
         ema = feed.ema[-1]
+        close = feed.candles[-1].close
         pos["ema_level"] = round(ema, 2)
         if pos["option"]["side"] == "CE":
-            return self.spot_ltp <= ema
-        return self.spot_ltp >= ema
+            return close <= ema
+        return close >= ema
 
     async def _manage_position(self, now: datetime, ltp: float | None) -> None:
         pos = self.position

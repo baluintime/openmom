@@ -121,7 +121,7 @@ class Backtester:
             "assumptions": [
                 "Entries fill at the open of the candle after the signal candle",
                 "Stop-loss checked before target within each 1-min candle (conservative)",
-                "EMA-touch exit evaluated on completed spot candles, exiting at the next minute's open",
+                "EMA-touch exit is close-confirmed (completed candle close vs EMA, wicks ignored), exiting at the next minute's open",
                 "Points-mode trailing steps at candle granularity, armed only by prior candles' highs",
                 "Delta filter not applied (historical greeks unavailable); premium-band + ATM/ITM selection",
                 f"₹{cfg.round_trip_charges:.0f} charges per round trip",
@@ -323,8 +323,10 @@ class Backtester:
         square_ts = datetime.combine(day, _parse_hhmm(cfg.square_off_at), tzinfo=TZ)
 
         # In "ema" trail mode the exit fires when a completed spot candle of the
-        # signal timeframe touches its 9-EMA (CE: candle low, PE: candle high);
-        # the position exits at the open of the next option minute. In "points"
+        # signal timeframe CLOSES at/across its 9-EMA (close-confirmed — an
+        # intra-candle wick through the EMA does not exit, matching the live
+        # engine); the position exits at the open of the next option minute.
+        # In "points"
         # mode eff_sl trails the captured high, recomputed only from *prior*
         # candles' highs (intra-candle ordering is unknowable -> conservative).
         ema_trail = cfg.trailing_stop and cfg.trail_mode == "ema"
@@ -346,8 +348,8 @@ class Backtester:
                        and spot[spot_j].ts + tf_delta <= c.ts):
                     se = ema[spot_j]
                     sc = spot[spot_j]
-                    if se is not None and ((side == "CE" and sc.low <= se)
-                                           or (side == "PE" and sc.high >= se)):
+                    if se is not None and ((side == "CE" and sc.close <= se)
+                                           or (side == "PE" and sc.close >= se)):
                         ema_touch_from = sc.ts + tf_delta
                         break
                     spot_j += 1
