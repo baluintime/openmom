@@ -115,7 +115,8 @@ class SpotFeed:
         CE: previous close at/below its EMA, latest close decisively above.
         PE: mirror image below.
         """
-        flat_info = {"flat": False, "move": None, "needed": self.flat_threshold(cfg)}
+        flat_info = {"flat": False, "move": None, "needed": self.flat_threshold(cfg),
+                     "raw_side": None, "margin": None}
         closes = [c.close for c in self.candles]
         ema = ema_series(closes, cfg.ema_period)
         if len(closes) < cfg.ema_period + max(2, cfg.flat_ema_lookback + 1):
@@ -131,11 +132,19 @@ class SpotFeed:
                 flat_info["move"] = abs(cur_e - ref)
                 flat_info["flat"] = flat_info["move"] < flat_info["needed"]
 
+        # raw cross first, then the decisive-margin qualification — a cross
+        # that fails the margin is surfaced via flat_info so it can be logged
         side = None
-        if prev_c <= prev_e and cur_c > cur_e + cfg.decisive_points:
-            side = "CE"
-        elif prev_c >= prev_e and cur_c < cur_e - cfg.decisive_points:
-            side = "PE"
+        if prev_c <= prev_e and cur_c > cur_e:
+            flat_info["raw_side"] = "CE"
+            flat_info["margin"] = cur_c - cur_e
+            if cur_c > cur_e + cfg.decisive_points:
+                side = "CE"
+        elif prev_c >= prev_e and cur_c < cur_e:
+            flat_info["raw_side"] = "PE"
+            flat_info["margin"] = cur_e - cur_c
+            if cur_c < cur_e - cfg.decisive_points:
+                side = "PE"
         if side is None:
             return None, flat_info
 

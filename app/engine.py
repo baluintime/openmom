@@ -175,6 +175,16 @@ class Engine:
     async def _check_signal(self, now: datetime, feed: SpotFeed, tf: int) -> None:
         signal, flat_info = feed.evaluate_signal(self.cfg)
         if signal is None:
+            if flat_info.get("raw_side") and feed.candles:
+                ts = feed.candles[-1].ts
+                key = ts.isoformat()
+                if self._handled_candle.get(tf) != key:
+                    self._handled_candle[tf] = key
+                    self.log("signal",
+                             f"{tf}m candle {ts.strftime('%H:%M')} crossed "
+                             f"{'above' if flat_info['raw_side'] == 'CE' else 'below'} 9-EMA "
+                             f"but closed only {flat_info['margin']:.2f} pts beyond "
+                             f"(need > {self.cfg.decisive_points}) — not decisive, no entry")
             return
         key = signal.candle_ts.isoformat()
         if self._handled_candle.get(tf) == key:
