@@ -165,11 +165,13 @@ class Engine:
             await self._manage_position(now, opt_ltp)
 
         # --- refresh candles + look for signals ---
+        # Higher timeframe first: at shared candle boundaries the 5-min signal
+        # (the spec's primary chart) gets first claim on the single position slot
         if self.risk.market_hours(now) or not self.feeds[self.cfg.timeframes[0]].candles:
-            for tf in list(self.cfg.timeframes):
+            for tf in sorted(self.cfg.timeframes, reverse=True):
                 feed = self.feeds[tf]
                 new = await feed.refresh()
-                if new and self.running and not self.position and not self.pending:
+                if new and self.running:
                     await self._check_signal(now, feed, tf)
 
     async def _check_signal(self, now: datetime, feed: SpotFeed, tf: int) -> None:
@@ -194,6 +196,11 @@ class Engine:
         label = (f"{tf}m candle {signal.candle_ts.strftime('%H:%M')} closed "
                  f"{'above' if signal.side == 'CE' else 'below'} 9-EMA "
                  f"(close {signal.close:.2f} / EMA {signal.ema:.2f})")
+        if self.position or self.pending:
+            held = self.position or self.pending
+            self.log("signal", f"{label} — SKIPPED: a {held['tf']}m position is "
+                               f"already open (one position at a time)")
+            return
         reason = self.risk.entry_gate(now, self.cfg)
         if reason:
             self.log("signal", f"{label} — SKIPPED: {reason}")
