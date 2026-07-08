@@ -154,7 +154,7 @@
 
   <div class="grid2">
     <section class="card">
-      <h2>Open position</h2>
+      <h2>Open positions</h2>
       <div id="position"><span class="note">No open position.</span></div>
     </section>
     <section class="card">
@@ -294,7 +294,7 @@ function render(){
     $('tCandle').textContent = eng.last_candle_ts ?
       'last candle ' + eng.last_candle_ts.slice(11,16) : '';
   }
-  const net = s.risk.day_net_rs + (s.position ? s.position.unrealized_rs : 0);
+  const net = s.risk.day_net_rs + (s.pnl.unrealized_rs || 0);
   $('tPnl').textContent = rs(net);
   $('tPnl').className = 'v ' + (net >= 0 ? 'pos' : 'neg');
   $('tGross').textContent = `gross ${rs(s.risk.day_gross_rs)} · charges ${rs(s.risk.day_charges_rs)}`;
@@ -310,19 +310,17 @@ function render(){
 
 function renderPosition(s){
   const el = $('position');
-  if (s.pending_entry) {
-    const p = s.pending_entry;
-    el.innerHTML = `<div class="kv">
-      <span class="k">Entry pending</span><span>${p.symbol} — BUY ${p.qty} LIMIT @ ₹${fmt(p.limit)}</span>
-      <span class="k">Timeframe</span><span>${p.tf}</span>
+  let html = '';
+  (s.pending_entries || []).forEach(p => {
+    html += `<div class="kv" style="margin-bottom:12px">
+      <span class="k">Entry pending [${p.tf}]</span><span>${p.symbol} — BUY ${p.qty} LIMIT @ ₹${fmt(p.limit)}</span>
       <span class="k">Cancels in</span><span>${p.seconds_left}s if unfilled</span></div>`;
-    return;
-  }
-  if (!s.position) { el.innerHTML = '<span class="note">No open position.</span>'; return; }
-  const p = s.position, cls = p.unrealized_rs >= 0 ? 'pos' : 'neg';
-  el.innerHTML = `<div class="kv">
-    <span class="k">Contract</span><span><b>${p.symbol}</b> (${p.side} ${p.strike}, exp ${p.expiry})</span>
-    <span class="k">Qty / TF</span><span>${p.qty} · ${p.tf} signal · entered ${p.entry_time}</span>
+  });
+  (s.positions || []).forEach(p => {
+    const cls = p.unrealized_rs >= 0 ? 'pos' : 'neg';
+    html += `<div class="kv" style="margin-bottom:12px">
+    <span class="k">Contract [${p.tf}]</span><span><b>${p.symbol}</b> (${p.side} ${p.strike}, exp ${p.expiry})</span>
+    <span class="k">Qty</span><span>${p.qty} · entered ${p.entry_time}</span>
     <span class="k">Entry / LTP</span><span>₹${fmt(p.entry)} → ₹${fmt(p.ltp)}</span>
     <span class="k">High / Low</span><span>₹${fmt(p.high)} / ₹${fmt(p.low)} since entry</span>
     <span class="k">Target / Stop</span><span>₹${fmt(p.target)} / ₹${fmt(p.stoploss)}${
@@ -331,6 +329,8 @@ function renderPosition(s){
     <span class="k">Unrealized</span><span class="${cls}"><b>${p.unrealized_points>=0?'+':''}${fmt(p.unrealized_points)} pts (${rs(p.unrealized_rs)})</b></span>
     ${p.exiting ? `<span class="k">Exiting</span><span>${p.exiting} order in flight…</span>` : ''}
   </div>`;
+  });
+  el.innerHTML = html || '<span class="note">No open position.</span>';
 }
 
 function renderGates(s){
@@ -351,6 +351,9 @@ function renderGates(s){
           `${fmt(c.flat_ema_points, 1)} pts (5m) over ${c.flat_ema_lookback} candles`
         : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
     g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
+    g(true, `Position slots: ${c.per_timeframe_positions
+        ? 'one per timeframe — 1m and 5m can hold simultaneously'
+        : 'single, shared across timeframes'}`) +
     g(true, `Trailing exit: ${!c.trailing_stop ? 'off'
         : c.trail_mode === 'ema'
           ? 'on — exit when a candle CLOSES across the 9-EMA (close-confirmed, not tick; target & hard stop still apply)'
@@ -587,6 +590,8 @@ function buildCfg(){
        <option value="ema" ${state.config.trail_mode==='ema'?'selected':''}>EMA touch (spot)</option>
        <option value="points" ${state.config.trail_mode==='points'?'selected':''}>Points gap (premium)</option>
      </select></label>` +
+    `<label>Position per timeframe<br><input data-k="per_timeframe_positions" type="checkbox"
+       ${state.config.per_timeframe_positions?'checked':''}></label>` +
     `<label>Trailing exit<br><input data-k="trailing_stop" type="checkbox"
        ${state.config.trailing_stop?'checked':''}></label>` +
     `<label>Flat-EMA filter<br><input data-k="flat_ema_filter" type="checkbox"

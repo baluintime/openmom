@@ -125,6 +125,8 @@ class Backtester:
                 "Points-mode trailing steps at candle granularity, armed only by prior candles' highs",
                 "Delta filter not applied (historical greeks unavailable); premium-band + ATM/ITM selection",
                 f"₹{cfg.round_trip_charges:.0f} charges per round trip",
+                "Timeframes are simulated independently (matches per-timeframe position slots; "
+                "single-slot cross-timeframe blocking is not modeled)",
             ],
             "timeframes": per_tf,
         }

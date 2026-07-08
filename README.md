@@ -24,7 +24,8 @@ with a web dashboard frontend.
 | PE entry | Mirror: decisive close below the 9-EMA → buy Put |
 | "Close" confirmation | Signals fire **only on completed candles** — never while a candle is painting |
 | Contract selection | Nearest expiry, ATM or ≤ 2 strikes ITM, premium band ₹80–90, delta 0.45–0.65 (from the live Upstox option chain; lot size read from the API) |
-| Position size | 2 lots (configurable) |
+| Position size | 2 lots (configurable) per position |
+| Position slots | One per timeframe by default — a 1-min and a 5-min trade can be open simultaneously (≈ double the capital deployed while both run). Configurable to a single shared slot. Daily limits (max trades, cutoffs) are shared across timeframes |
 | Entry orders | **LIMIT** (LTP + small buffer); auto-cancelled if unfilled in 30 s |
 | Target | +4 premium points (LIMIT exit) |
 | Stop-loss | −3 premium points (MARKET exit) |

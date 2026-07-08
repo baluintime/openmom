@@ -111,7 +111,7 @@ async def stop():
 
 @app.post("/api/squareoff")
 async def squareoff():
-    if not engine.position:
+    if not engine.positions:
         raise HTTPException(400, "No open position")
     engine.request_squareoff()
     return {"ok": True}
@@ -138,7 +138,7 @@ async def get_config():
 async def set_config(body: dict = Body(...)):
     cfg = engine.cfg
     editable = {
-        "timeframes", "ema_period", "decisive_points", "flat_ema_filter",
+        "timeframes", "per_timeframe_positions", "ema_period", "decisive_points", "flat_ema_filter",
         "flat_ema_points", "flat_ema_lookback", "lots", "capital",
         "max_risk_capital_per_trade", "premium_band_low", "premium_band_high",
         "delta_low", "delta_high", "max_itm_strikes", "target_points",

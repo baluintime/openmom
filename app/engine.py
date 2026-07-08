@@ -40,8 +40,8 @@ class Engine:
         self._sync_feeds()
 
         self.spot_ltp: float | None = None
-        self.pending: dict | None = None      # entry order in flight
-        self.position: dict | None = None     # open long option position
+        self.pendings: dict[int, dict] = {}   # entry orders in flight, keyed by timeframe
+        self.positions: dict[int, dict] = {}  # open long positions, keyed by timeframe
         self._manual_squareoff = False
         self._handled_candle: dict[int, str] = {}
 
@@ -80,7 +80,7 @@ class Engine:
         self.log("engine", "Manual square-off requested")
 
     def set_mode(self, mode: str) -> None:
-        if self.position or self.pending:
+        if self.positions or self.pendings:
             raise UpstoxError("Cannot switch mode with an open or pending position")
         self.cfg.mode = mode
         self.cfg.validate()
@@ -145,24 +145,25 @@ class Engine:
         if not self.client.access_token:
             return
 
-        # --- live prices (real Upstox LTP; one call for spot + active option) ---
+        # --- live prices (real Upstox LTP; one call for spot + active options) ---
         keys = [SPOT_INSTRUMENT_KEY]
-        active = self.position or self.pending
-        if active:
-            keys.append(active["option"]["instrument_key"])
+        for a in list(self.pendings.values()) + list(self.positions.values()):
+            k = a["option"]["instrument_key"]
+            if k not in keys:
+                keys.append(k)
         ltp_map = await self.client.ltp(keys)
         self.spot_ltp = ltp_map.get(SPOT_INSTRUMENT_KEY, self.spot_ltp)
-        opt_ltp = ltp_map.get(active["option"]["instrument_key"]) if active else None
-        if self.position is not None and opt_ltp:
-            self.position["ltp"] = opt_ltp
 
-        # --- manage in-flight entry order ---
-        if self.pending:
-            await self._manage_pending(now, opt_ltp)
+        # --- manage in-flight entry orders ---
+        for tf, p in list(self.pendings.items()):
+            await self._manage_pending(tf, p, now, ltp_map.get(p["option"]["instrument_key"]))
 
-        # --- manage open position (runs even when engine is stopped) ---
-        if self.position:
-            await self._manage_position(now, opt_ltp)
+        # --- manage open positions (runs even when engine is stopped) ---
+        for pos in list(self.positions.values()):
+            opt_ltp = ltp_map.get(pos["option"]["instrument_key"])
+            if opt_ltp:
+                pos["ltp"] = opt_ltp
+            await self._manage_position(pos, now, opt_ltp)
 
         # --- refresh candles + look for signals ---
         # Higher timeframe first: at shared candle boundaries the 5-min signal
@@ -196,10 +197,16 @@ class Engine:
         label = (f"{tf}m candle {signal.candle_ts.strftime('%H:%M')} closed "
                  f"{'above' if signal.side == 'CE' else 'below'} 9-EMA "
                  f"(close {signal.close:.2f} / EMA {signal.ema:.2f})")
-        if self.position or self.pending:
-            held = self.position or self.pending
+        if self.cfg.per_timeframe_positions:
+            if tf in self.positions or tf in self.pendings:
+                self.log("signal", f"{label} — SKIPPED: this timeframe's position "
+                                   f"slot is already in use")
+                return
+        elif self.positions or self.pendings:
+            held = next(iter(list(self.positions.values())
+                             + list(self.pendings.values())))
             self.log("signal", f"{label} — SKIPPED: a {held['tf']}m position is "
-                               f"already open (one position at a time)")
+                               f"already open (single-position mode)")
             return
         reason = self.risk.entry_gate(now, self.cfg)
         if reason:
@@ -228,7 +235,7 @@ class Engine:
         order = await self.broker().place(
             instrument_key=opt.instrument_key, side="BUY",
             order_type="LIMIT", qty=qty, price=limit)
-        self.pending = {
+        self.pendings[tf] = {
             "option": asdict(opt), "order": order, "qty": qty, "tf": tf,
             "signal_candle": candle_ts.strftime("%H:%M"),
             "deadline": time.time() + self.cfg.entry_fill_timeout_sec,
@@ -238,14 +245,14 @@ class Engine:
                           f"delta {opt.delta if opt.delta is not None else 'n/a'}, "
                           f"expiry {opt.expiry}) [{self.cfg.mode.upper()}]")
 
-    async def _manage_pending(self, now: datetime, opt_ltp: float | None) -> None:
-        p = self.pending
+    async def _manage_pending(self, tf: int, p: dict, now: datetime,
+                              opt_ltp: float | None) -> None:
         order: BrokerOrder = await self.broker().poll(p["order"], opt_ltp)
         if order.status == FILLED:
-            self.pending = None
+            self.pendings.pop(tf, None)
             self._open_position(p, order.avg_price, order.qty, now)
         elif order.status == REJECTED:
-            self.pending = None
+            self.pendings.pop(tf, None)
             self.log("order", f"Entry rejected by broker: {order.order_id}")
         elif order.status == OPEN and time.time() > p["deadline"]:
             try:
@@ -255,7 +262,7 @@ class Engine:
                 return
             # a live order may have partially filled before the cancel landed
             filled = order.filled_qty
-            self.pending = None
+            self.pendings.pop(tf, None)
             if filled > 0 and order.avg_price > 0:
                 self.log("order", f"Entry partially filled ({filled}/{order.qty}) before "
                                   f"timeout cancel — managing the filled quantity")
@@ -265,7 +272,7 @@ class Engine:
 
     def _open_position(self, p: dict, entry: float, qty: int, now: datetime) -> None:
         self.risk.record_entry()
-        self.position = {
+        self.positions[p["tf"]] = pos = {
             "option": p["option"], "qty": qty, "tf": p["tf"],
             "signal_candle": p["signal_candle"],
             "entry_price": entry, "entry_time": now.strftime("%H:%M:%S"),
@@ -274,10 +281,9 @@ class Engine:
             "high": entry, "low": entry, "trail_stop": None,
             "ltp": entry, "exit_order": None, "exit_reason": None,
         }
-        self._manual_squareoff = False
-        self.log("trade", f"ENTERED {p['option']['trading_symbol']} — {qty} qty @ ₹{entry:.2f} "
-                          f"| target ₹{self.position['target']:.2f} "
-                          f"| stop ₹{self.position['stoploss']:.2f} "
+        self.log("trade", f"ENTERED [{p['tf']}m] {p['option']['trading_symbol']} — {qty} qty "
+                          f"@ ₹{entry:.2f} | target ₹{pos['target']:.2f} "
+                          f"| stop ₹{pos['stoploss']:.2f} "
                           f"(trade {self.risk.trades_taken}/{self.cfg.max_trades_per_day})")
 
     # ---------------- exits ----------------
@@ -312,8 +318,7 @@ class Engine:
             return close <= ema
         return close >= ema
 
-    async def _manage_position(self, now: datetime, ltp: float | None) -> None:
-        pos = self.position
+    async def _manage_position(self, pos: dict, now: datetime, ltp: float | None) -> None:
         if ltp is not None and ltp > 0:  # capture the excursion since entry
             pos["high"] = max(pos["high"], ltp)
             pos["low"] = min(pos["low"], ltp)
@@ -324,7 +329,7 @@ class Engine:
         if exit_order is not None:
             exit_order = await self.broker().poll(exit_order, ltp)
             if exit_order.status == FILLED:
-                self._finalize_trade(exit_order.avg_price, now)
+                self._finalize_trade(pos, exit_order.avg_price, now)
                 return
             if exit_order.status in (REJECTED, CANCELLED):
                 pos["exit_order"] = None  # will re-trigger below
@@ -365,10 +370,10 @@ class Engine:
                               f"{pos['option']['trading_symbol']}"
                               + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else ""))
 
-    def _finalize_trade(self, exit_price: float, now: datetime) -> None:
-        pos = self.position
-        self.position = None
-        self._manual_squareoff = False
+    def _finalize_trade(self, pos: dict, exit_price: float, now: datetime) -> None:
+        self.positions.pop(pos["tf"], None)
+        if not self.positions and not self.pendings:
+            self._manual_squareoff = False
         pnl_points = exit_price - pos["entry_price"]
         gross = pnl_points * pos["qty"]
         charges = self.cfg.round_trip_charges
@@ -389,8 +394,8 @@ class Engine:
             "reason": reason,
         }
         self._append_trade(trade)
-        self.log("trade", f"EXITED {trade['symbol']} @ ₹{exit_price:.2f} ({reason}) — "
-                          f"{pnl_points:+.2f} pts, net ₹{trade['net_rs']:+,.2f}")
+        self.log("trade", f"EXITED [{pos['tf']}m] {trade['symbol']} @ ₹{exit_price:.2f} "
+                          f"({reason}) — {pnl_points:+.2f} pts, net ₹{trade['net_rs']:+,.2f}")
         if hit_target and self.cfg.stop_after_target:
             self.log("risk", "Target achieved — terminal deactivated for the day")
         if self.risk.consecutive_losses >= self.cfg.max_consecutive_losses:
@@ -400,11 +405,10 @@ class Engine:
 
     def status(self) -> dict:
         now = datetime.now(TZ)
-        pos = None
-        if self.position:
-            p = self.position
+        positions = []
+        for p in self.positions.values():
             unreal_pts = (p["ltp"] - p["entry_price"]) if p.get("ltp") else 0.0
-            pos = {
+            positions.append({
                 "symbol": p["option"]["trading_symbol"], "side": p["option"]["side"],
                 "strike": p["option"]["strike"], "expiry": p["option"]["expiry"],
                 "qty": p["qty"], "tf": f"{p['tf']}m",
@@ -417,15 +421,12 @@ class Engine:
                 "unrealized_points": round(unreal_pts, 2),
                 "unrealized_rs": round(unreal_pts * p["qty"], 2),
                 "exiting": p.get("exit_reason"),
-            }
-        pending = None
-        if self.pending:
-            q = self.pending
-            pending = {
-                "symbol": q["option"]["trading_symbol"], "qty": q["qty"],
-                "limit": q["order"].limit_price, "tf": f"{q['tf']}m",
-                "seconds_left": max(0, int(q["deadline"] - time.time())),
-            }
+            })
+        pendings = [{
+            "symbol": q["option"]["trading_symbol"], "qty": q["qty"],
+            "limit": q["order"].limit_price, "tf": f"{q['tf']}m",
+            "seconds_left": max(0, int(q["deadline"] - time.time())),
+        } for q in self.pendings.values()]
         realized_net = sum(t["net_rs"] for t in self.trades)
         return {
             "now_ist": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -435,10 +436,11 @@ class Engine:
             "expiry": self.selector.expiry,
             "lot_size": self.selector.lot_size,
             "engines": {f"{tf}m": self.feeds[tf].snapshot() for tf in self.cfg.timeframes},
-            "position": pos,
-            "pending_entry": pending,
+            "positions": positions,
+            "pending_entries": pendings,
             "risk": self.risk.snapshot(now, self.cfg),
             "pnl": {"realized_net_rs": round(realized_net, 2),
+                    "unrealized_rs": round(sum(p["unrealized_rs"] for p in positions), 2),
                     "capital": self.cfg.capital,
                     "equity": round(self.cfg.capital + realized_net, 2)},
             "trades": list(reversed(self.trades)),

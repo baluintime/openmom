@@ -51,7 +51,11 @@ class StrategyConfig:
     flat_ema_filter: bool = True
     flat_ema_points: float = 3.0
     flat_ema_lookback: int = 3
-    # Position sizing
+    # Position slots: True = one concurrent position per timeframe (a 1m and a
+    # 5m trade can be open simultaneously; capital for both must be available);
+    # False = a single position shared across timeframes
+    per_timeframe_positions: bool = True
+    # Position sizing (per position)
     lots: int = 2
     capital: float = 30000.0
     max_risk_capital_per_trade: float = 12000.0
