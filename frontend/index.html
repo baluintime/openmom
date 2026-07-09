@@ -564,7 +564,8 @@ function renderBacktest(r){
 
 // ---------- settings ----------
 const CFG_FIELDS = [
-  ['ema_period','EMA period','number'], ['decisive_points','Decisive close (pts)','number'],
+  ['ema_period','EMA period','number'], ['candle_grace_sec','Candle finalize grace (s)','number'],
+  ['decisive_points','Decisive close (pts)','number'],
   ['target_points','Target (+pts)','number'], ['stoploss_points','Stop-loss (−pts)','number'],
   ['trail_activate_points','Trail arms at (+pts)','number'],
   ['trail_gap_points','Trail gap (pts)','number'],

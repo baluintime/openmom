@@ -61,10 +61,12 @@ class SpotFeed:
     """Fetches real NIFTY 50 spot candles from Upstox for one timeframe and
     detects 9-EMA decisive-close breakouts on newly completed candles."""
 
-    def __init__(self, client: UpstoxClient, timeframe_min: int, ema_period: int = 9):
+    def __init__(self, client: UpstoxClient, timeframe_min: int, ema_period: int = 9,
+                 grace_sec: int = 6):
         self.client = client
         self.tf = timeframe_min
         self.ema_period = ema_period
+        self.grace_sec = grace_sec
         self.candles: list[Candle] = []
         self.ema: list[float | None] = []
         self.last_processed_ts: datetime | None = None
@@ -91,8 +93,12 @@ class SpotFeed:
         await self._load_seed(now)
         rows = await self.client.intraday_candles(SPOT_INSTRUMENT_KEY, self.tf)
         today = [Candle.from_api(r) for r in rows]
-        # A candle stamped ts covers [ts, ts + tf); it is complete once now >= ts + tf
-        completed_today = [c for c in today if now >= c.ts + timedelta(minutes=self.tf)]
+        # A candle stamped ts covers [ts, ts + tf). Upstox finalizes the row a
+        # few seconds AFTER the boundary — reading at the exact boundary can
+        # return a stale close (observed ~7 pts off on 5m) — so a candle only
+        # counts as complete grace_sec after it ends.
+        cutoff = timedelta(minutes=self.tf, seconds=self.grace_sec)
+        completed_today = [c for c in today if now >= c.ts + cutoff]
         self.candles = self._seed + completed_today
         self.ema = ema_series([c.close for c in self.candles], self.ema_period)
         new = [c for c in completed_today

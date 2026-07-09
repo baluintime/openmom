@@ -42,6 +42,10 @@ class StrategyConfig:
     timeframes: list[int] = field(default_factory=lambda: [1, 5])
     # Trend indicator
     ema_period: int = 9
+    # Upstox's intraday candle API finalizes a just-closed candle a few seconds
+    # after the boundary; reading at the exact boundary returns a stale close.
+    # A candle counts as completed only this many seconds after it ends.
+    candle_grace_sec: int = 6
     # "Decisive" close: candle close must clear the 9-EMA by this many index points
     decisive_points: float = 2.0
     # Flat-EMA filter (Institutional Block Filter): skip if the EMA moved less

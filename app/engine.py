@@ -58,8 +58,10 @@ class Engine:
     def _sync_feeds(self) -> None:
         for tf in self.cfg.timeframes:
             if tf not in self.feeds:
-                self.feeds[tf] = SpotFeed(self.client, tf, self.cfg.ema_period)
+                self.feeds[tf] = SpotFeed(self.client, tf, self.cfg.ema_period,
+                                          self.cfg.candle_grace_sec)
             self.feeds[tf].ema_period = self.cfg.ema_period
+            self.feeds[tf].grace_sec = self.cfg.candle_grace_sec
         for tf in list(self.feeds):
             if tf not in self.cfg.timeframes:
                 del self.feeds[tf]
