@@ -160,6 +160,7 @@ async def set_config(body: dict = Body(...)):
             setattr(cfg, k, v)
         raise HTTPException(400, str(e))
     save_strategy_config(cfg)
+    engine._sync_feeds()
     engine.log("config", "Strategy parameters updated")
     return asdict(cfg)
 

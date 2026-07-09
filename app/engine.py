@@ -26,6 +26,7 @@ from .upstox_client import UpstoxClient, UpstoxError
 
 TZ = ZoneInfo(IST)
 TRADES_FILE = DATA_DIR / "trades.jsonl"
+POSITIONS_FILE = DATA_DIR / "positions.json"
 
 
 class Engine:
@@ -49,6 +50,7 @@ class Engine:
         self.trades: list[dict] = self._load_today_trades()
         self._last_error: str = ""
         self._task: asyncio.Task | None = None
+        self._load_positions()
 
     # ---------------- lifecycle ----------------
 
@@ -63,7 +65,10 @@ class Engine:
             self.feeds[tf].ema_period = self.cfg.ema_period
             self.feeds[tf].grace_sec = self.cfg.candle_grace_sec
         for tf in list(self.feeds):
-            if tf not in self.cfg.timeframes:
+            # keep the feed while a position/order of this timeframe is active —
+            # the EMA-touch exit needs its candles even if the tf was disabled
+            if tf not in self.cfg.timeframes and tf not in self.positions \
+                    and tf not in self.pendings:
                 del self.feeds[tf]
 
     def start(self) -> None:
@@ -121,6 +126,50 @@ class Engine:
         self.trades.append(trade)
         with TRADES_FILE.open("a") as f:
             f.write(json.dumps(trade) + "\n")
+
+    def _save_positions(self) -> None:
+        """Persist open positions so an app restart mid-trade cannot orphan them."""
+        def ser(pos: dict) -> dict:
+            d = {k: v for k, v in pos.items() if k != "exit_order"}
+            o = pos.get("exit_order")
+            if o is not None:
+                d["exit_order_state"] = {
+                    "order_id": o.order_id, "instrument_key": o.instrument_key,
+                    "side": o.side, "order_type": o.order_type,
+                    "qty": o.qty, "limit_price": o.limit_price}
+            return d
+        try:
+            POSITIONS_FILE.write_text(json.dumps({
+                "day": datetime.now(TZ).strftime("%Y-%m-%d"), "mode": self.cfg.mode,
+                "positions": {str(tf): ser(p) for tf, p in self.positions.items()}}))
+        except OSError:
+            pass
+
+    def _load_positions(self) -> None:
+        if not POSITIONS_FILE.exists():
+            return
+        try:
+            d = json.loads(POSITIONS_FILE.read_text())
+        except Exception:
+            return
+        if (d.get("day") != datetime.now(TZ).strftime("%Y-%m-%d")
+                or d.get("mode") != self.cfg.mode):
+            return
+        for tf_s, p in d.get("positions", {}).items():
+            st = p.pop("exit_order_state", None)
+            p["exit_order"] = None
+            if st and self.cfg.mode == "live":
+                # a live exit order survives the restart — resume polling it by id
+                p["exit_order"] = BrokerOrder(
+                    order_id=st["order_id"], instrument_key=st["instrument_key"],
+                    side=st["side"], order_type=st["order_type"],
+                    qty=st["qty"], limit_price=st["limit_price"])
+            self.positions[int(tf_s)] = p
+            self.log("engine", f"Restored open [{tf_s}m] position "
+                               f"{p['option']['trading_symbol']} after restart"
+                               + (" (resuming exit order)" if p["exit_order"] else ""))
+        if self.positions:
+            self._sync_feeds()
 
     # ---------------- main loop ----------------
 
@@ -283,6 +332,7 @@ class Engine:
             "high": entry, "low": entry, "trail_stop": None,
             "ltp": entry, "exit_order": None, "exit_reason": None,
         }
+        self._save_positions()
         self.log("trade", f"ENTERED [{p['tf']}m] {p['option']['trading_symbol']} — {qty} qty "
                           f"@ ₹{entry:.2f} | target ₹{pos['target']:.2f} "
                           f"| stop ₹{pos['stoploss']:.2f} "
@@ -354,6 +404,17 @@ class Engine:
             elif self._manual_squareoff:
                 reason, order_type = "manual", "MARKET"
             elif self.risk.square_off_due(now, self.cfg) or not self.risk.market_hours(now):
+                if not self.risk.market_hours(now) and self.cfg.mode == "live":
+                    # a live MARKET order outside market hours only gets rejected
+                    # over and over — warn once and stand down (Upstox RMS
+                    # auto-squares intraday product at end of day)
+                    if not pos.get("orphan_warned"):
+                        pos["orphan_warned"] = True
+                        self._save_positions()
+                        self.log("error", f"Market closed with open live position "
+                                          f"{pos['option']['trading_symbol']} — verify at the "
+                                          f"broker (intraday product is RMS-squared)")
+                    return
                 reason, order_type = "squareoff", "MARKET"
             elif ltp is not None and ltp <= stop_price:
                 reason, order_type = stop_reason, "MARKET"
@@ -368,12 +429,14 @@ class Engine:
                 order_type=order_type, qty=pos["qty"], price=price)
             pos["exit_order"] = order
             pos["exit_reason"] = reason
+            self._save_positions()
             self.log("order", f"EXIT ({reason}) SELL {order_type} {pos['qty']} × "
                               f"{pos['option']['trading_symbol']}"
                               + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else ""))
 
     def _finalize_trade(self, pos: dict, exit_price: float, now: datetime) -> None:
         self.positions.pop(pos["tf"], None)
+        self._save_positions()
         if not self.positions and not self.pendings:
             self._manual_squareoff = False
         pnl_points = exit_price - pos["entry_price"]
@@ -401,7 +464,9 @@ class Engine:
         if hit_target and self.cfg.stop_after_target:
             self.log("risk", "Target achieved — terminal deactivated for the day")
         if self.risk.consecutive_losses >= self.cfg.max_consecutive_losses:
-            self.log("risk", "Two consecutive stop-losses — operations terminated for the day")
+            self.log("risk", f"{self.risk.consecutive_losses} consecutive losing trades "
+                             f"(limit {self.cfg.max_consecutive_losses}) — no further "
+                             f"entries today")
 
     # ---------------- status ----------------
 
@@ -437,7 +502,8 @@ class Engine:
             "spot": self.spot_ltp,
             "expiry": self.selector.expiry,
             "lot_size": self.selector.lot_size,
-            "engines": {f"{tf}m": self.feeds[tf].snapshot() for tf in self.cfg.timeframes},
+            "engines": {f"{tf}m": self.feeds[tf].snapshot()
+                        for tf in self.cfg.timeframes if tf in self.feeds},
             "positions": positions,
             "pending_entries": pendings,
             "risk": self.risk.snapshot(now, self.cfg),
