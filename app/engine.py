@@ -49,6 +49,7 @@ class Engine:
         self.events: deque[dict] = deque(maxlen=200)
         self.trades: list[dict] = self._load_today_trades()
         self._last_error: str = ""
+        self._last_error_ts: float = 0.0
         self._task: asyncio.Task | None = None
         self._load_positions()
 
@@ -185,8 +186,12 @@ class Engine:
             await asyncio.sleep(2 if (in_market and self.client.access_token) else 15)
 
     def _note_error(self, msg: str) -> None:
-        if msg != self._last_error:
+        # dedupe repeats, but resurface a persisting error every 2 minutes so a
+        # stream of identical failures cannot go silently unnoticed
+        now_t = time.time()
+        if msg != self._last_error or now_t - self._last_error_ts > 120:
             self._last_error = msg
+            self._last_error_ts = now_t
             self.log("error", msg)
 
     async def _tick(self) -> None:
@@ -224,13 +229,22 @@ class Engine:
                 feed = self.feeds[tf]
                 new = await feed.refresh()
                 if new and self.running:
-                    await self._check_signal(now, feed, tf)
+                    if len(new) > 1:
+                        self.log("data", f"{tf}m: {len(new)} candles completed in one "
+                                         f"poll (data delay) — evaluating each")
+                    base = len(feed.candles) - len(new)
+                    for k in range(len(new)):
+                        # only the newest candle may trigger an entry; older
+                        # ones are evaluated for the log so nothing vanishes
+                        await self._check_signal(now, feed, tf, at=base + k,
+                                                 actionable=(k == len(new) - 1))
 
-    async def _check_signal(self, now: datetime, feed: SpotFeed, tf: int) -> None:
-        signal, flat_info = feed.evaluate_signal(self.cfg)
+    async def _check_signal(self, now: datetime, feed: SpotFeed, tf: int,
+                            at: int | None = None, actionable: bool = True) -> None:
+        signal, flat_info = feed.evaluate_signal(self.cfg, at)
         if signal is None:
             if flat_info.get("raw_side") and feed.candles:
-                ts = feed.candles[-1].ts
+                ts = feed.candles[at if at is not None else -1].ts
                 key = ts.isoformat()
                 if self._handled_candle.get(tf) != key:
                     self._handled_candle[tf] = key
@@ -248,6 +262,10 @@ class Engine:
         label = (f"{tf}m candle {signal.candle_ts.strftime('%H:%M')} closed "
                  f"{'above' if signal.side == 'CE' else 'below'} 9-EMA "
                  f"(close {signal.close:.2f} / EMA {signal.ema:.2f})")
+        if not actionable:
+            self.log("signal", f"{label} — {signal.side} signal EXPIRED "
+                               f"(a newer candle arrived in the same poll) — no entry")
+            return
         if self.cfg.per_timeframe_positions:
             if tf in self.positions or tf in self.pendings:
                 self.log("signal", f"{label} — SKIPPED: this timeframe's position "

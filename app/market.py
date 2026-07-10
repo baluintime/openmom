@@ -101,8 +101,12 @@ class SpotFeed:
         completed_today = [c for c in today if now >= c.ts + cutoff]
         self.candles = self._seed + completed_today
         self.ema = ema_series([c.close for c in self.candles], self.ema_period)
-        new = [c for c in completed_today
-               if self.last_processed_ts is None or c.ts > self.last_processed_ts]
+        if self.last_processed_ts is None:
+            # first refresh (startup/restart): only the latest candle is "new" —
+            # the morning's history must not be replayed as signals
+            new = completed_today[-1:]
+        else:
+            new = [c for c in completed_today if c.ts > self.last_processed_ts]
         if completed_today:
             self.last_processed_ts = completed_today[-1].ts
         return new
@@ -114,16 +118,18 @@ class SpotFeed:
         veto nearly every 1-min crossover."""
         return cfg.flat_ema_points * self.tf / 5.0
 
-    def evaluate_signal(self, cfg: StrategyConfig) -> tuple[Signal | None, dict]:
-        """Signal on the latest completed candle, plus flat-EMA measurements
-        {flat, move, needed}.
+    def evaluate_signal(self, cfg: StrategyConfig,
+                        at: int | None = None) -> tuple[Signal | None, dict]:
+        """Signal on the completed candle at index `at` (default: the latest),
+        plus flat-EMA measurements {flat, move, needed}.
 
         CE: previous close at/below its EMA, latest close decisively above.
         PE: mirror image below.
         """
         flat_info = {"flat": False, "move": None, "needed": self.flat_threshold(cfg),
                      "raw_side": None, "margin": None}
-        closes = [c.close for c in self.candles]
+        end = len(self.candles) if at is None else at + 1
+        closes = [c.close for c in self.candles[:end]]
         ema = ema_series(closes, cfg.ema_period)
         if len(closes) < cfg.ema_period + max(2, cfg.flat_ema_lookback + 1):
             return None, flat_info
@@ -154,7 +160,7 @@ class SpotFeed:
         if side is None:
             return None, flat_info
 
-        return Signal(side=side, timeframe=self.tf, candle_ts=self.candles[-1].ts,
+        return Signal(side=side, timeframe=self.tf, candle_ts=self.candles[end - 1].ts,
                       close=cur_c, ema=cur_e), flat_info
 
     def snapshot(self, points: int = 75) -> dict:
