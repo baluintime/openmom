@@ -55,31 +55,6 @@ class Signal:
     candle_ts: datetime
     close: float
     ema: float
-    confirmed_from: datetime | None = None   # crossing candle, when this is a
-                                             # confirmation (not the cross itself)
-
-
-def find_confirmed_cross(closes: list[float], ema: list[float | None],
-                         i: int, side: str, window: int) -> int | None:
-    """Confirmation-entry search: candle i already closed beyond the EMA in
-    `side`'s direction. Return the index of a raw EMA cross into that direction
-    within the previous `window` candles, provided every close since stayed
-    beyond the EMA (a close back across cancels the setup). None otherwise."""
-    for back in range(1, window + 1):
-        j = i - back
-        if j < 1 or ema[j] is None or ema[j - 1] is None:
-            return None
-        if side == "CE":
-            if closes[j] <= ema[j]:
-                return None            # closed back across: setup dead
-            if closes[j - 1] <= ema[j - 1]:
-                return j               # this was the crossing candle
-        else:
-            if closes[j] >= ema[j]:
-                return None
-            if closes[j - 1] >= ema[j - 1]:
-                return j
-    return None
 
 
 class SpotFeed:
@@ -166,7 +141,6 @@ class SpotFeed:
         # raw cross first, then the decisive-margin qualification — a cross
         # that fails the margin is surfaced via flat_info so it can be logged
         side = None
-        confirmed_from = None
         if prev_c <= prev_e and cur_c > cur_e:
             flat_info["raw_side"] = "CE"
             flat_info["margin"] = cur_c - cur_e
@@ -177,23 +151,11 @@ class SpotFeed:
             flat_info["margin"] = cur_e - cur_c
             if cur_c < cur_e - cfg.decisive_points:
                 side = "PE"
-        elif cfg.confirm_window_candles > 0:
-            # no fresh cross on this candle: confirmation-entry check for a
-            # recent non-decisive cross that this candle's close now validates
-            i = len(closes) - 1
-            if cur_c > cur_e + cfg.decisive_points:
-                j = find_confirmed_cross(closes, ema, i, "CE", cfg.confirm_window_candles)
-                if j is not None:
-                    side, confirmed_from = "CE", self.candles[j].ts
-            elif cur_c < cur_e - cfg.decisive_points:
-                j = find_confirmed_cross(closes, ema, i, "PE", cfg.confirm_window_candles)
-                if j is not None:
-                    side, confirmed_from = "PE", self.candles[j].ts
         if side is None:
             return None, flat_info
 
         return Signal(side=side, timeframe=self.tf, candle_ts=self.candles[-1].ts,
-                      close=cur_c, ema=cur_e, confirmed_from=confirmed_from), flat_info
+                      close=cur_c, ema=cur_e), flat_info
 
     def snapshot(self, points: int = 75) -> dict:
         cs = self.candles[-points:]

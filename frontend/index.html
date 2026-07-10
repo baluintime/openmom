@@ -349,8 +349,7 @@ function renderGates(s){
     g(true, `Flat-EMA filter: ${c.flat_ema_filter
         ? `on — EMA must move ≥ ${fmt(c.flat_ema_points * 1 / 5, 1)} pts (1m) / ` +
           `${fmt(c.flat_ema_points, 1)} pts (5m) over ${c.flat_ema_lookback} candles`
-        : 'off'} · decisive close ≥ ${c.decisive_points} pts · confirm window ${
-        c.confirm_window_candles > 0 ? c.confirm_window_candles + ' candles' : 'off'}`) +
+        : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
     g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
     g(true, `Position slots: ${c.per_timeframe_positions
         ? 'one per timeframe — 1m and 5m can hold simultaneously'
@@ -567,7 +566,6 @@ function renderBacktest(r){
 const CFG_FIELDS = [
   ['ema_period','EMA period','number'], ['candle_grace_sec','Candle finalize grace (s)','number'],
   ['decisive_points','Decisive close (pts)','number'],
-  ['confirm_window_candles','Confirm window (candles, 0=off)','number'],
   ['target_points','Target (+pts)','number'], ['stoploss_points','Stop-loss (−pts)','number'],
   ['trail_activate_points','Trail arms at (+pts)','number'],
   ['trail_gap_points','Trail gap (pts)','number'],

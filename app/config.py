@@ -48,11 +48,6 @@ class StrategyConfig:
     candle_grace_sec: int = 6
     # "Decisive" close: candle close must clear the 9-EMA by this many index points
     decisive_points: float = 2.0
-    # Confirmation window: if a cross happens with a non-decisive margin, a
-    # candle within the next N candles that CLOSES decisively beyond the EMA
-    # (price never having closed back across) still enters. 0 = strict spec
-    # (only the exact crossing candle can trigger).
-    confirm_window_candles: int = 3
     # Flat-EMA filter (Institutional Block Filter): skip if the EMA moved less
     # than flat_ema_points over flat_ema_lookback completed candles. The points
     # value is defined on the 5-min chart and scaled by timeframe/5 elsewhere
@@ -114,8 +109,6 @@ class StrategyConfig:
             raise ValueError("lots must be >= 1")
         if self.target_points <= 0 or self.stoploss_points <= 0:
             raise ValueError("target/stoploss points must be positive")
-        if not 0 <= int(self.confirm_window_candles) <= 10:
-            raise ValueError("confirm_window_candles must be between 0 and 10")
         if self.trail_mode not in ("ema", "points"):
             raise ValueError("trail_mode must be 'ema' or 'points'")
         if self.trail_gap_points <= 0 or self.trail_activate_points < 0:

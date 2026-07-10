@@ -23,7 +23,6 @@ with a web dashboard frontend.
 | CE entry | Completed candle closes *decisively* above the 9-EMA (≥ 2 pts, configurable) → buy ATM/slightly-ITM Call at the open of the next candle |
 | PE entry | Mirror: decisive close below the 9-EMA → buy Put |
 | "Close" confirmation | Signals fire **only on completed candles** — never while a candle is painting |
-| Confirmation entry | If a cross closes with a non-decisive margin, a candle within the next 3 (configurable, 0 = strict spec) that closes decisively beyond the EMA — price never having closed back across — still enters. Catches gradual roll-overs the crossing-candle rule structurally misses |
 | Contract selection | Nearest expiry, ATM or ≤ 2 strikes ITM, premium band ₹80–90, delta 0.45–0.65 (from the live Upstox option chain; lot size read from the API) |
 | Position size | 2 lots (configurable) per position |
 | Position slots | One per timeframe by default — a 1-min and a 5-min trade can be open simultaneously (≈ double the capital deployed while both run). Configurable to a single shared slot. Daily limits (max trades, cutoffs) are shared across timeframes |

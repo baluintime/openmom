@@ -24,7 +24,7 @@ from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from .config import IST, SPOT_INSTRUMENT_KEY, StrategyConfig
-from .market import Candle, ema_series, find_confirmed_cross
+from .market import Candle, ema_series
 from .risk import _parse_hhmm
 from .upstox_client import UpstoxClient, UpstoxError
 
@@ -232,19 +232,6 @@ class Backtester:
                     side = "CE"
                 elif prev_c >= prev_e and cur_c < cur_e - cfg.decisive_points:
                     side = "PE"
-                elif (cfg.confirm_window_candles > 0
-                      and not (prev_c <= prev_e and cur_c > cur_e)
-                      and not (prev_c >= prev_e and cur_c < cur_e)):
-                    # confirmation entry: decisive close validating a recent
-                    # non-decisive cross (same rule as the live engine)
-                    if cur_c > cur_e + cfg.decisive_points:
-                        if find_confirmed_cross(closes, ema, i, "CE",
-                                                cfg.confirm_window_candles) is not None:
-                            side = "CE"
-                    elif cur_c < cur_e - cfg.decisive_points:
-                        if find_confirmed_cross(closes, ema, i, "PE",
-                                                cfg.confirm_window_candles) is not None:
-                            side = "PE"
                 if side is None:
                     continue
 
