@@ -247,7 +247,9 @@ class Engine:
 
         label = (f"{tf}m candle {signal.candle_ts.strftime('%H:%M')} closed "
                  f"{'above' if signal.side == 'CE' else 'below'} 9-EMA "
-                 f"(close {signal.close:.2f} / EMA {signal.ema:.2f})")
+                 f"(close {signal.close:.2f} / EMA {signal.ema:.2f})"
+                 + (f" — confirms cross at {signal.confirmed_from.strftime('%H:%M')}"
+                    if signal.confirmed_from else ""))
         if self.cfg.per_timeframe_positions:
             if tf in self.positions or tf in self.pendings:
                 self.log("signal", f"{label} — SKIPPED: this timeframe's position "
