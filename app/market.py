@@ -127,7 +127,7 @@ class SpotFeed:
         PE: mirror image below.
         """
         flat_info = {"flat": False, "move": None, "needed": self.flat_threshold(cfg),
-                     "raw_side": None, "margin": None}
+                     "raw_side": None, "margin": None, "first_cross": False}
         end = len(self.candles) if at is None else at + 1
         closes = [c.close for c in self.candles[:end]]
         ema = ema_series(closes, cfg.ema_period)
@@ -157,6 +157,22 @@ class SpotFeed:
             flat_info["margin"] = cur_e - cur_c
             if cur_c < cur_e - cfg.decisive_points:
                 side = "PE"
+        if flat_info["raw_side"] is not None:
+            # is this the session's first price/EMA cross? (crosses on earlier
+            # candles of the signal candle's day, incl. the overnight pair)
+            sig_date = self.candles[end - 1].ts.date()
+            prior = 0
+            for j in range(1, end - 1):
+                if self.candles[j].ts.date() != sig_date:
+                    continue
+                ej, ej1 = ema[j], ema[j - 1]
+                if ej is None or ej1 is None:
+                    continue
+                cj, cj1 = closes[j], closes[j - 1]
+                if (cj1 <= ej1 and cj > ej) or (cj1 >= ej1 and cj < ej):
+                    prior += 1
+            flat_info["first_cross"] = prior == 0
+
         if side is None:
             return None, flat_info
 

@@ -48,6 +48,10 @@ class StrategyConfig:
     candle_grace_sec: int = 6
     # "Decisive" close: candle close must clear the 9-EMA by this many index points
     decisive_points: float = 2.0
+    # Opening warm-up: the first price/EMA cross of the session is not traded
+    # (a gap open inherits yesterday's EMA relationship and produces unreliable
+    # opening crosses); entries are allowed from the second cross onward
+    skip_first_cross: bool = True
     # Flat-EMA filter (Institutional Block Filter): skip if the EMA moved less
     # than flat_ema_points over flat_ema_lookback completed candles. The points
     # value is defined on the 5-min chart and scaled by timeframe/5 elsewhere

@@ -278,6 +278,10 @@ class Engine:
         if reason:
             self.log("signal", f"{label} — SKIPPED: {reason}")
             return
+        if self.cfg.skip_first_cross and flat_info.get("first_cross"):
+            self.log("signal", f"{label} — SKIPPED: first EMA cross of the session "
+                               f"(opening warm-up — entries start from the second cross)")
+            return
         if flat_info["flat"]:
             self.log("signal", f"{label} — SKIPPED: flat 9-EMA "
                      f"(moved {flat_info['move']:.2f} pts over "

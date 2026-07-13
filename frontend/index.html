@@ -351,6 +351,9 @@ function renderGates(s){
           `${fmt(c.flat_ema_points, 1)} pts (5m) over ${c.flat_ema_lookback} candles`
         : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
     g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
+    g(true, `Opening warm-up: ${c.skip_first_cross
+        ? "on — the session's first EMA cross is not traded (entries from the 2nd cross)"
+        : 'off — opening crosses can trade'}`) +
     g(true, `Position slots: ${c.per_timeframe_positions
         ? 'one per timeframe — 1m and 5m can hold simultaneously'
         : 'single, shared across timeframes'}`) +
@@ -591,6 +594,8 @@ function buildCfg(){
        <option value="ema" ${state.config.trail_mode==='ema'?'selected':''}>EMA touch (spot)</option>
        <option value="points" ${state.config.trail_mode==='points'?'selected':''}>Points gap (premium)</option>
      </select></label>` +
+    `<label>Skip first cross of day<br><input data-k="skip_first_cross" type="checkbox"
+       ${state.config.skip_first_cross?'checked':''}></label>` +
     `<label>Position per timeframe<br><input data-k="per_timeframe_positions" type="checkbox"
        ${state.config.per_timeframe_positions?'checked':''}></label>` +
     `<label>Trailing exit<br><input data-k="trailing_stop" type="checkbox"

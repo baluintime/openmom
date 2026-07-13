@@ -116,6 +116,7 @@ class Backtester:
                 "midday_block": [cfg.midday_block_start, cfg.midday_block_end]
                                  if cfg.midday_block else None,
                 "flat_ema_filter": cfg.flat_ema_filter,
+                "skip_first_cross": cfg.skip_first_cross,
                 "round_trip_charges": cfg.round_trip_charges,
             },
             "assumptions": [
@@ -215,18 +216,24 @@ class Backtester:
                            f"Backtesting {tf}-min — {day.isoformat()}")
             idxs = day_indexes.get(day, [])
             trades_today = consec_sl = 0
+            crosses_today = 0
             target_hit = False
             busy_until: datetime | None = None
 
             for i in idxs:
-                if i < 1 or i + 1 >= len(spot):
+                if i < 1:
                     continue
-                if spot[i + 1].ts.date() != day:
-                    continue  # signal on the last candle of the day: no next-candle entry
                 prev_e, cur_e = ema[i - 1], ema[i]
                 if prev_e is None or cur_e is None:
                     continue
                 prev_c, cur_c = closes[i - 1], closes[i]
+                is_cross = ((prev_c <= prev_e and cur_c > cur_e)
+                            or (prev_c >= prev_e and cur_c < cur_e))
+                prior_crosses = crosses_today
+                if is_cross:
+                    crosses_today += 1
+                if i + 1 >= len(spot) or spot[i + 1].ts.date() != day:
+                    continue  # signal on the last candle of the day: no next-candle entry
                 side = None
                 if prev_c <= prev_e and cur_c > cur_e + cfg.decisive_points:
                     side = "CE"
@@ -234,6 +241,8 @@ class Backtester:
                     side = "PE"
                 if side is None:
                     continue
+                if cfg.skip_first_cross and prior_crosses == 0:
+                    continue  # opening warm-up: the session's first cross is not traded
 
                 entry_ts = spot[i + 1].ts
                 # --- risk gates (identical to the live engine) ---
