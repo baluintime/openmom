@@ -45,6 +45,7 @@ class Engine:
         self.positions: dict[int, dict] = {}  # open long positions, keyed by timeframe
         self._manual_squareoff = False
         self._handled_candle: dict[int, str] = {}
+        self._deferred: dict[int, dict] = {}  # signals waiting for a freed slot
 
         self.events: deque[dict] = deque(maxlen=200)
         self.trades: list[dict] = self._load_today_trades()
@@ -210,6 +211,12 @@ class Engine:
         ltp_map = await self.client.ltp(keys)
         self.spot_ltp = ltp_map.get(SPOT_INSTRUMENT_KEY, self.spot_ltp)
 
+        # --- refresh candles FIRST so exits act on the freshest close ---
+        new_by_tf: dict[int, list] = {}
+        if self.risk.market_hours(now) or not self.feeds[self.cfg.timeframes[0]].candles:
+            for tf in sorted(self.cfg.timeframes, reverse=True):
+                new_by_tf[tf] = await self.feeds[tf].refresh()
+
         # --- manage in-flight entry orders ---
         for tf, p in list(self.pendings.items()):
             await self._manage_pending(tf, p, now, ltp_map.get(p["option"]["instrument_key"]))
@@ -221,23 +228,24 @@ class Engine:
                 pos["ltp"] = opt_ltp
             await self._manage_position(pos, now, opt_ltp)
 
-        # --- refresh candles + look for signals ---
-        # Higher timeframe first: at shared candle boundaries the 5-min signal
-        # (the spec's primary chart) gets first claim on the single position slot
-        if self.risk.market_hours(now) or not self.feeds[self.cfg.timeframes[0]].candles:
-            for tf in sorted(self.cfg.timeframes, reverse=True):
+        # --- signals: higher timeframe first (the spec's primary chart gets
+        # first claim on a position slot at shared candle boundaries) ---
+        for tf in sorted(self.cfg.timeframes, reverse=True):
+            new = new_by_tf.get(tf) or []
+            if new and self.running:
                 feed = self.feeds[tf]
-                new = await feed.refresh()
-                if new and self.running:
-                    if len(new) > 1:
-                        self.log("data", f"{tf}m: {len(new)} candles completed in one "
-                                         f"poll (data delay) — evaluating each")
-                    base = len(feed.candles) - len(new)
-                    for k in range(len(new)):
-                        # only the newest candle may trigger an entry; older
-                        # ones are evaluated for the log so nothing vanishes
-                        await self._check_signal(now, feed, tf, at=base + k,
-                                                 actionable=(k == len(new) - 1))
+                if len(new) > 1:
+                    self.log("data", f"{tf}m: {len(new)} candles completed in one "
+                                     f"poll (data delay) — evaluating each")
+                base = len(feed.candles) - len(new)
+                for k in range(len(new)):
+                    # only the newest candle may trigger an entry; older
+                    # ones are evaluated for the log so nothing vanishes
+                    await self._check_signal(now, feed, tf, at=base + k,
+                                             actionable=(k == len(new) - 1))
+
+        # --- deferred signals: enter as soon as the exiting position frees the slot ---
+        await self._try_deferred(now)
 
     async def _check_signal(self, now: datetime, feed: SpotFeed, tf: int,
                             at: int | None = None, actionable: bool = True) -> None:
@@ -266,17 +274,6 @@ class Engine:
             self.log("signal", f"{label} — {signal.side} signal EXPIRED "
                                f"(a newer candle arrived in the same poll) — no entry")
             return
-        if self.cfg.per_timeframe_positions:
-            if tf in self.positions or tf in self.pendings:
-                self.log("signal", f"{label} — SKIPPED: this timeframe's position "
-                                   f"slot is already in use")
-                return
-        elif self.positions or self.pendings:
-            held = next(iter(list(self.positions.values())
-                             + list(self.pendings.values())))
-            self.log("signal", f"{label} — SKIPPED: a {held['tf']}m position is "
-                               f"already open (single-position mode)")
-            return
         reason = self.risk.entry_gate(now, self.cfg)
         if reason:
             self.log("signal", f"{label} — SKIPPED: {reason}")
@@ -286,9 +283,48 @@ class Engine:
                      f"(moved {flat_info['move']:.2f} pts over "
                      f"{self.cfg.flat_ema_lookback} candles, need ≥ {flat_info['needed']:.2f})")
             return
+        holder = self._slot_holder(tf)
+        if holder is not None:
+            # a reversal candle exits the old position and signals the new one
+            # simultaneously — don't discard the signal, wait for the slot
+            # through the succeeding candle (the spec's entry window)
+            expires = signal.candle_ts + timedelta(minutes=2 * tf)
+            self._deferred[tf] = {"signal": signal, "label": label, "expires": expires}
+            self.log("signal", f"{label} — slot held by a {holder['tf']}m position; "
+                               f"deferred (enters if the slot frees before "
+                               f"{expires.strftime('%H:%M')})")
+            return
 
         self.log("signal", f"{label} — {signal.side} entry trigger")
+        self._deferred.pop(tf, None)
         await self._enter(signal.side, tf, signal.candle_ts)
+
+    def _slot_holder(self, tf: int) -> dict | None:
+        """The position/pending currently occupying tf's entry slot, if any."""
+        if self.cfg.per_timeframe_positions:
+            return self.positions.get(tf) or self.pendings.get(tf)
+        held = list(self.positions.values()) + list(self.pendings.values())
+        return held[0] if held else None
+
+    async def _try_deferred(self, now: datetime) -> None:
+        for tf, d in list(self._deferred.items()):
+            if tf not in self.cfg.timeframes or not self.running:
+                del self._deferred[tf]
+                continue
+            if now >= d["expires"]:
+                del self._deferred[tf]
+                self.log("signal", f"{d['label']} — deferred entry expired "
+                                   f"(slot never freed)")
+                continue
+            if self._slot_holder(tf) is not None:
+                continue
+            del self._deferred[tf]
+            reason = self.risk.entry_gate(now, self.cfg)
+            if reason:
+                self.log("signal", f"{d['label']} — deferred entry blocked: {reason}")
+                continue
+            self.log("signal", f"{d['label']} — slot freed, entering now")
+            await self._enter(d["signal"].side, tf, d["signal"].candle_ts)
 
     # ---------------- entries ----------------
 
@@ -451,6 +487,11 @@ class Engine:
             self.log("order", f"EXIT ({reason}) SELL {order_type} {pos['qty']} × "
                               f"{pos['option']['trading_symbol']}"
                               + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else ""))
+            # settle immediately when possible (paper MARKET fills at the
+            # current LTP) so a reversal signal can take the slot this tick
+            order = await self.broker().poll(order, ltp)
+            if order.status == FILLED:
+                self._finalize_trade(pos, order.avg_price, now)
 
     def _finalize_trade(self, pos: dict, exit_price: float, now: datetime) -> None:
         self.positions.pop(pos["tf"], None)
