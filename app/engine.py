@@ -21,7 +21,7 @@ from .broker import CANCELLED, FILLED, OPEN, REJECTED, BrokerOrder, LiveBroker, 
 from .config import DATA_DIR, IST, SPOT_INSTRUMENT_KEY, StrategyConfig, save_strategy_config
 from .market import SpotFeed
 from .options import OptionSelector, SelectedOption
-from .risk import RiskManager
+from .risk import RiskManager, _parse_hhmm
 from .upstox_client import UpstoxClient, UpstoxError
 
 TZ = ZoneInfo(IST)
@@ -278,9 +278,11 @@ class Engine:
         if reason:
             self.log("signal", f"{label} — SKIPPED: {reason}")
             return
-        if self.cfg.skip_first_cross and flat_info.get("first_cross"):
+        if (self.cfg.skip_first_cross and flat_info.get("first_cross")
+                and signal.candle_ts.time() < _parse_hhmm(self.cfg.skip_first_cross_before)):
             self.log("signal", f"{label} — SKIPPED: first EMA cross of the session "
-                               f"(opening warm-up — entries start from the second cross)")
+                               f"before {self.cfg.skip_first_cross_before} (opening "
+                               f"gap-settling — entries start from the second cross)")
             return
         if flat_info["flat"]:
             self.log("signal", f"{label} — SKIPPED: flat 9-EMA "

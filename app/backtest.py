@@ -241,8 +241,9 @@ class Backtester:
                     side = "PE"
                 if side is None:
                     continue
-                if cfg.skip_first_cross and prior_crosses == 0:
-                    continue  # opening warm-up: the session's first cross is not traded
+                if (cfg.skip_first_cross and prior_crosses == 0
+                        and spot[i].ts.time() < _parse_hhmm(cfg.skip_first_cross_before)):
+                    continue  # gap-settling: an early first cross is not traded
 
                 entry_ts = spot[i + 1].ts
                 # --- risk gates (identical to the live engine) ---

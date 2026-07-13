@@ -23,7 +23,7 @@ with a web dashboard frontend.
 | CE entry | Completed candle closes *decisively* above the 9-EMA (≥ 2 pts, configurable) → buy ATM/slightly-ITM Call at the open of the next candle |
 | PE entry | Mirror: decisive close below the 9-EMA → buy Put |
 | "Close" confirmation | Signals fire **only on completed candles** — never while a candle is painting |
-| Opening warm-up | The session's **first** price/EMA cross (per timeframe) is never traded — gap opens inherit yesterday's EMA relationship; entries start from the second cross (configurable) |
+| Opening warm-up | If the session's **first** price/EMA cross (per timeframe) happens before 09:20 it is treated as gap-settling and not traded — entries then start from the second cross. A first cross at/after 09:20 trades normally (cutoff configurable) |
 | Contract selection | Nearest expiry, ATM or ≤ 2 strikes ITM, premium band ₹80–90, delta 0.45–0.65 (from the live Upstox option chain; lot size read from the API) |
 | Position size | 2 lots (configurable) per position |
 | Position slots | One per timeframe by default — a 1-min and a 5-min trade can be open simultaneously (≈ double the capital deployed while both run). Configurable to a single shared slot. Daily limits (max trades, cutoffs) are shared across timeframes |

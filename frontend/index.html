@@ -352,7 +352,8 @@ function renderGates(s){
         : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
     g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
     g(true, `Opening warm-up: ${c.skip_first_cross
-        ? "on — the session's first EMA cross is not traded (entries from the 2nd cross)"
+        ? `on — a first cross before ${c.skip_first_cross_before} is not traded ` +
+          `(entries from the 2nd cross); a later first cross trades normally`
         : 'off — opening crosses can trade'}`) +
     g(true, `Position slots: ${c.per_timeframe_positions
         ? 'one per timeframe — 1m and 5m can hold simultaneously'
@@ -577,6 +578,7 @@ const CFG_FIELDS = [
   ['delta_high','Delta high','number'], ['max_trades_per_day','Max trades/day','number'],
   ['max_consecutive_losses','Max consecutive SL','number'],
   ['flat_ema_points','Flat-EMA threshold (pts)','number'],
+  ['skip_first_cross_before','Skip 1st cross before (HH:MM)','text'],
   ['midday_block_start','Block start (HH:MM)','text'], ['midday_block_end','Block end (HH:MM)','text'],
   ['no_entries_after','No entries after (HH:MM)','text'], ['square_off_at','Square off at (HH:MM)','text'],
   ['entry_limit_buffer','Entry limit buffer ₹','number'],
