@@ -148,6 +148,7 @@ async def set_config(body: dict = Body(...)):
         "max_consecutive_losses", "midday_block", "midday_block_start",
         "midday_block_end", "no_entries_after", "square_off_at",
         "entry_limit_buffer", "entry_fill_timeout_sec", "round_trip_charges",
+        "tf_overrides",
     }
     old = asdict(cfg)
     for k, v in body.items():

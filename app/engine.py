@@ -64,7 +64,7 @@ class Engine:
             if tf not in self.feeds:
                 self.feeds[tf] = SpotFeed(self.client, tf, self.cfg.ema_period,
                                           self.cfg.candle_grace_sec)
-            self.feeds[tf].ema_period = self.cfg.ema_period
+            self.feeds[tf].ema_period = self.cfg.for_tf(tf).ema_period
             self.feeds[tf].grace_sec = self.cfg.candle_grace_sec
         for tf in list(self.feeds):
             # keep the feed while a position/order of this timeframe is active —
@@ -102,12 +102,18 @@ class Engine:
 
     # ---------------- logging / persistence ----------------
 
-    def log(self, kind: str, msg: str) -> None:
+    def log(self, kind: str, msg: str, tf: int | None = None) -> None:
         now = datetime.now(TZ)
-        self.events.appendleft({"ts": now.strftime("%H:%M:%S"), "kind": kind, "msg": msg})
-        try:  # persistent copy, one file per day
+        tf_tag = f"{tf}m" if tf else None
+        self.events.appendleft({"ts": now.strftime("%H:%M:%S"), "kind": kind,
+                                "msg": msg, "tf": tf_tag})
+        try:  # persistent copies, one pair of files per day:
+            # .log  — human-readable;  .jsonl — structured, for analysis
             with (DATA_DIR / f"events-{now:%Y-%m-%d}.log").open("a", encoding="utf-8") as f:
-                f.write(f"{now:%H:%M:%S} [{kind}] {msg}\n")
+                f.write(f"{now:%H:%M:%S} [{tf_tag or '--'}] [{kind}] {msg}\n")
+            with (DATA_DIR / f"events-{now:%Y-%m-%d}.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"ts": now.isoformat(), "tf": tf_tag,
+                                    "kind": kind, "msg": msg}, ensure_ascii=False) + "\n")
         except OSError:
             pass
 
@@ -167,9 +173,10 @@ class Engine:
                     side=st["side"], order_type=st["order_type"],
                     qty=st["qty"], limit_price=st["limit_price"])
             self.positions[int(tf_s)] = p
-            self.log("engine", f"Restored open [{tf_s}m] position "
+            self.log("engine", f"Restored open position "
                                f"{p['option']['trading_symbol']} after restart"
-                               + (" (resuming exit order)" if p["exit_order"] else ""))
+                               + (" (resuming exit order)" if p["exit_order"] else ""),
+                     tf=int(tf_s))
         if self.positions:
             self._sync_feeds()
 
@@ -235,8 +242,8 @@ class Engine:
             if new and self.running:
                 feed = self.feeds[tf]
                 if len(new) > 1:
-                    self.log("data", f"{tf}m: {len(new)} candles completed in one "
-                                     f"poll (data delay) — evaluating each")
+                    self.log("data", f"{len(new)} candles completed in one "
+                                     f"poll (data delay) — evaluating each", tf=tf)
                 base = len(feed.candles) - len(new)
                 for k in range(len(new)):
                     # only the newest candle may trigger an entry; older
@@ -249,7 +256,8 @@ class Engine:
 
     async def _check_signal(self, now: datetime, feed: SpotFeed, tf: int,
                             at: int | None = None, actionable: bool = True) -> None:
-        signal, flat_info = feed.evaluate_signal(self.cfg, at)
+        tfcfg = self.cfg.for_tf(tf)
+        signal, flat_info = feed.evaluate_signal(tfcfg, at)
         if signal is None:
             if flat_info.get("raw_side") and feed.candles:
                 ts = feed.candles[at if at is not None else -1].ts
@@ -260,7 +268,7 @@ class Engine:
                              f"{tf}m candle {ts.strftime('%H:%M')} crossed "
                              f"{'above' if flat_info['raw_side'] == 'CE' else 'below'} 9-EMA "
                              f"but closed only {flat_info['margin']:.2f} pts beyond "
-                             f"(need > {self.cfg.decisive_points}) — not decisive, no entry")
+                             f"(need > {tfcfg.decisive_points}) — not decisive, no entry", tf=tf)
             return
         key = signal.candle_ts.isoformat()
         if self._handled_candle.get(tf) == key:
@@ -272,22 +280,23 @@ class Engine:
                  f"(close {signal.close:.2f} / EMA {signal.ema:.2f})")
         if not actionable:
             self.log("signal", f"{label} — {signal.side} signal EXPIRED "
-                               f"(a newer candle arrived in the same poll) — no entry")
+                               f"(a newer candle arrived in the same poll) — no entry", tf=tf)
             return
         reason = self.risk.entry_gate(now, self.cfg)
         if reason:
-            self.log("signal", f"{label} — SKIPPED: {reason}")
+            self.log("signal", f"{label} — SKIPPED: {reason}", tf=tf)
             return
         if (self.cfg.skip_first_cross and flat_info.get("first_cross")
                 and signal.candle_ts.time() < _parse_hhmm(self.cfg.skip_first_cross_before)):
             self.log("signal", f"{label} — SKIPPED: first EMA cross of the session "
                                f"before {self.cfg.skip_first_cross_before} (opening "
-                               f"gap-settling — entries start from the second cross)")
+                               f"gap-settling — entries start from the second cross)", tf=tf)
             return
         if flat_info["flat"]:
             self.log("signal", f"{label} — SKIPPED: flat 9-EMA "
                      f"(moved {flat_info['move']:.2f} pts over "
-                     f"{self.cfg.flat_ema_lookback} candles, need ≥ {flat_info['needed']:.2f})")
+                     f"{tfcfg.flat_ema_lookback} candles, need ≥ {flat_info['needed']:.2f})",
+                     tf=tf)
             return
         holder = self._slot_holder(tf)
         if holder is not None:
@@ -298,10 +307,10 @@ class Engine:
             self._deferred[tf] = {"signal": signal, "label": label, "expires": expires}
             self.log("signal", f"{label} — slot held by a {holder['tf']}m position; "
                                f"deferred (enters if the slot frees before "
-                               f"{expires.strftime('%H:%M')})")
+                               f"{expires.strftime('%H:%M')})", tf=tf)
             return
 
-        self.log("signal", f"{label} — {signal.side} entry trigger")
+        self.log("signal", f"{label} — {signal.side} entry trigger", tf=tf)
         self._deferred.pop(tf, None)
         await self._enter(signal.side, tf, signal.candle_ts)
 
@@ -320,41 +329,42 @@ class Engine:
             if now >= d["expires"]:
                 del self._deferred[tf]
                 self.log("signal", f"{d['label']} — deferred entry expired "
-                                   f"(slot never freed)")
+                                   f"(slot never freed)", tf=tf)
                 continue
             if self._slot_holder(tf) is not None:
                 continue
             del self._deferred[tf]
             reason = self.risk.entry_gate(now, self.cfg)
             if reason:
-                self.log("signal", f"{d['label']} — deferred entry blocked: {reason}")
+                self.log("signal", f"{d['label']} — deferred entry blocked: {reason}", tf=tf)
                 continue
-            self.log("signal", f"{d['label']} — slot freed, entering now")
+            self.log("signal", f"{d['label']} — slot freed, entering now", tf=tf)
             await self._enter(d["signal"].side, tf, d["signal"].candle_ts)
 
     # ---------------- entries ----------------
 
     async def _enter(self, side: str, tf: int, candle_ts: datetime) -> None:
-        opt = await self.selector.select(side, self.cfg)
-        qty = self.cfg.lots * opt.lot_size
+        tfcfg = self.cfg.for_tf(tf)
+        opt = await self.selector.select(side, tfcfg)
+        qty = tfcfg.lots * opt.lot_size
         cost = qty * opt.ltp
         if cost > self.cfg.max_risk_capital_per_trade:
             self.log("risk", f"Note: entry cost ₹{cost:,.0f} exceeds the "
                              f"₹{self.cfg.max_risk_capital_per_trade:,.0f} risk allocation "
-                             f"(premium {opt.ltp:.2f} × {qty})")
-        limit = round(opt.ltp + self.cfg.entry_limit_buffer, 2)
+                             f"(premium {opt.ltp:.2f} × {qty})", tf=tf)
+        limit = round(opt.ltp + tfcfg.entry_limit_buffer, 2)
         order = await self.broker().place(
             instrument_key=opt.instrument_key, side="BUY",
             order_type="LIMIT", qty=qty, price=limit)
         self.pendings[tf] = {
             "option": asdict(opt), "order": order, "qty": qty, "tf": tf,
             "signal_candle": candle_ts.strftime("%H:%M"),
-            "deadline": time.time() + self.cfg.entry_fill_timeout_sec,
+            "deadline": time.time() + tfcfg.entry_fill_timeout_sec,
         }
         self.log("order", f"BUY LIMIT {qty} × {opt.trading_symbol} @ ₹{limit:.2f} "
                           f"(LTP {opt.ltp:.2f}, strike {opt.strike:.0f}, "
                           f"delta {opt.delta if opt.delta is not None else 'n/a'}, "
-                          f"expiry {opt.expiry}) [{self.cfg.mode.upper()}]")
+                          f"expiry {opt.expiry}) [{self.cfg.mode.upper()}]", tf=tf)
 
     async def _manage_pending(self, tf: int, p: dict, now: datetime,
                               opt_ltp: float | None) -> None:
@@ -364,49 +374,53 @@ class Engine:
             self._open_position(p, order.avg_price, order.qty, now)
         elif order.status == REJECTED:
             self.pendings.pop(tf, None)
-            self.log("order", f"Entry rejected by broker: {order.order_id}")
+            self.log("order", f"Entry rejected by broker: {order.order_id}", tf=tf)
         elif order.status == OPEN and time.time() > p["deadline"]:
             try:
                 await self.broker().cancel(order)
             except UpstoxError as e:
-                self.log("error", f"Cancel failed ({e}); rechecking order")
+                self.log("error", f"Cancel failed ({e}); rechecking order", tf=tf)
                 return
             # a live order may have partially filled before the cancel landed
             filled = order.filled_qty
             self.pendings.pop(tf, None)
             if filled > 0 and order.avg_price > 0:
                 self.log("order", f"Entry partially filled ({filled}/{order.qty}) before "
-                                  f"timeout cancel — managing the filled quantity")
+                                  f"timeout cancel — managing the filled quantity", tf=tf)
                 self._open_position(p, order.avg_price, filled, now)
             else:
-                self.log("order", "Entry not filled within timeout — cancelled (setup skipped)")
+                self.log("order", "Entry not filled within timeout — cancelled "
+                                  "(setup skipped)", tf=tf)
 
     def _open_position(self, p: dict, entry: float, qty: int, now: datetime) -> None:
         self.risk.record_entry()
+        tfcfg = self.cfg.for_tf(p["tf"])
         self.positions[p["tf"]] = pos = {
             "option": p["option"], "qty": qty, "tf": p["tf"],
             "signal_candle": p["signal_candle"],
             "entry_price": entry, "entry_time": now.strftime("%H:%M:%S"),
-            "target": round(entry + self.cfg.target_points, 2),
-            "stoploss": round(entry - self.cfg.stoploss_points, 2),
+            "target": round(entry + tfcfg.target_points, 2),
+            "stoploss": round(entry - tfcfg.stoploss_points, 2),
             "high": entry, "low": entry, "trail_stop": None,
             "ltp": entry, "exit_order": None, "exit_reason": None,
         }
         self._save_positions()
-        self.log("trade", f"ENTERED [{p['tf']}m] {p['option']['trading_symbol']} — {qty} qty "
+        self.log("trade", f"ENTERED {p['option']['trading_symbol']} — {qty} qty "
                           f"@ ₹{entry:.2f} | target ₹{pos['target']:.2f} "
                           f"| stop ₹{pos['stoploss']:.2f} "
-                          f"(trade {self.risk.trades_taken}/{self.cfg.max_trades_per_day})")
+                          f"(trade {self.risk.trades_taken}/{self.cfg.max_trades_per_day})",
+                 tf=p["tf"])
 
     # ---------------- exits ----------------
 
     def _effective_stop(self, pos: dict) -> tuple[float, str]:
         """Initial stop, or (in points mode) the trailed stop off the captured
         high once armed. Returns (stop_price, reason_if_hit)."""
+        tfcfg = self.cfg.for_tf(pos["tf"])
         stop, reason = pos["stoploss"], "stoploss"
-        if (self.cfg.trailing_stop and self.cfg.trail_mode == "points"
-                and pos["high"] >= pos["entry_price"] + self.cfg.trail_activate_points):
-            trail = round(pos["high"] - self.cfg.trail_gap_points, 2)
+        if (tfcfg.trailing_stop and tfcfg.trail_mode == "points"
+                and pos["high"] >= pos["entry_price"] + tfcfg.trail_activate_points):
+            trail = round(pos["high"] - tfcfg.trail_gap_points, 2)
             if trail > stop:
                 stop, reason = trail, "trailstop"
         pos["trail_stop"] = stop if reason == "trailstop" else None
@@ -418,7 +432,8 @@ class Engine:
         9-EMA (CE: close at/below, PE: close at/above). Ticks that pierce
         the EMA while a candle is still painting do not exit."""
         pos["ema_level"] = None
-        if not (self.cfg.trailing_stop and self.cfg.trail_mode == "ema"):
+        tfcfg = self.cfg.for_tf(pos["tf"])
+        if not (tfcfg.trailing_stop and tfcfg.trail_mode == "ema"):
             return False
         feed = self.feeds.get(pos["tf"])
         if feed is None or not feed.candles or not feed.ema or feed.ema[-1] is None:
@@ -473,7 +488,8 @@ class Engine:
                         self._save_positions()
                         self.log("error", f"Market closed with open live position "
                                           f"{pos['option']['trading_symbol']} — verify at the "
-                                          f"broker (intraday product is RMS-squared)")
+                                          f"broker (intraday product is RMS-squared)",
+                                 tf=pos["tf"])
                     return
                 reason, order_type = "squareoff", "MARKET"
             elif ltp is not None and ltp <= stop_price:
@@ -492,7 +508,8 @@ class Engine:
             self._save_positions()
             self.log("order", f"EXIT ({reason}) SELL {order_type} {pos['qty']} × "
                               f"{pos['option']['trading_symbol']}"
-                              + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else ""))
+                              + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else ""),
+                     tf=pos["tf"])
             # settle immediately when possible (paper MARKET fills at the
             # current LTP) so a reversal signal can take the slot this tick
             order = await self.broker().poll(order, ltp)
@@ -508,7 +525,8 @@ class Engine:
         gross = pnl_points * pos["qty"]
         charges = self.cfg.round_trip_charges
         reason = pos.get("exit_reason") or "exit"
-        hit_target = reason == "target" or pnl_points >= self.cfg.target_points - 0.01
+        tfcfg = self.cfg.for_tf(pos["tf"])
+        hit_target = reason == "target" or pnl_points >= tfcfg.target_points - 0.01
         self.risk.record_exit(pnl_points, gross, charges, hit_target)
         trade = {
             "day": self.risk.day, "mode": self.cfg.mode, "tf": f"{pos['tf']}m",
@@ -524,8 +542,9 @@ class Engine:
             "reason": reason,
         }
         self._append_trade(trade)
-        self.log("trade", f"EXITED [{pos['tf']}m] {trade['symbol']} @ ₹{exit_price:.2f} "
-                          f"({reason}) — {pnl_points:+.2f} pts, net ₹{trade['net_rs']:+,.2f}")
+        self.log("trade", f"EXITED {trade['symbol']} @ ₹{exit_price:.2f} "
+                          f"({reason}) — {pnl_points:+.2f} pts, net ₹{trade['net_rs']:+,.2f}",
+                 tf=pos["tf"])
         if hit_target and self.cfg.stop_after_target:
             self.log("risk", "Target achieved — terminal deactivated for the day")
         if self.risk.consecutive_losses >= self.cfg.max_consecutive_losses:

@@ -117,6 +117,7 @@ class Backtester:
                                  if cfg.midday_block else None,
                 "flat_ema_filter": cfg.flat_ema_filter,
                 "skip_first_cross": cfg.skip_first_cross,
+                "tf_overrides": cfg.tf_overrides,
                 "round_trip_charges": cfg.round_trip_charges,
             },
             "assumptions": [
@@ -200,6 +201,7 @@ class Backtester:
 
     async def _simulate_tf(self, cfg: StrategyConfig, tf: int, spot: list[Candle],
                            days: list[date], base_pct: float, span_pct: float) -> dict:
+        cfg = cfg.for_tf(tf)   # apply this timeframe's setting overrides
         closes = [c.close for c in spot]
         ema = ema_series(closes, cfg.ema_period)
         day_indexes: dict[date, list[int]] = {}

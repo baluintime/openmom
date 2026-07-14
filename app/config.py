@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,6 +23,19 @@ TOKEN_FILE = DATA_DIR / "token.json"
 
 SPOT_INSTRUMENT_KEY = "NSE_INDEX|Nifty 50"
 IST = "Asia/Kolkata"
+
+# Strategy parameters that may differ between the 1-min and 5-min engines.
+# Everything else (mode, capital, session limits, mid-day block, warm-up,
+# square-off, charges) is session-level and shared.
+PER_TF_FIELDS = frozenset({
+    "ema_period", "decisive_points",
+    "flat_ema_filter", "flat_ema_points", "flat_ema_lookback",
+    "lots", "premium_band_low", "premium_band_high",
+    "delta_low", "delta_high", "max_itm_strikes",
+    "target_points", "stoploss_points",
+    "trailing_stop", "trail_mode", "trail_activate_points", "trail_gap_points",
+    "entry_limit_buffer", "entry_fill_timeout_sec",
+})
 
 
 @dataclass
@@ -103,6 +116,20 @@ class StrategyConfig:
     entry_fill_timeout_sec: int = 30  # cancel unfilled entry after this
     # Cost model (round trip, for net P&L reporting)
     round_trip_charges: float = 56.0
+    # Per-timeframe overrides: {"1": {field: value, ...}, "5": {...}} — only
+    # PER_TF_FIELDS are honoured; unset fields fall back to the values above
+    tf_overrides: dict = field(default_factory=dict)
+
+    def for_tf(self, tf: int) -> "StrategyConfig":
+        """Effective config for one timeframe (base + that tf's overrides)."""
+        ov = (self.tf_overrides or {}).get(str(tf)) or {}
+        if not ov:
+            return self
+        merged = replace(self)
+        for k, v in ov.items():
+            if k in PER_TF_FIELDS:
+                setattr(merged, k, v)
+        return merged
 
     def validate(self) -> None:
         if self.mode not in ("paper", "live"):
@@ -111,14 +138,24 @@ class StrategyConfig:
         if not tfs or any(t not in (1, 5) for t in tfs):
             raise ValueError("timeframes must be a non-empty subset of [1, 5]")
         self.timeframes = tfs
-        if self.lots < 1:
-            raise ValueError("lots must be >= 1")
-        if self.target_points <= 0 or self.stoploss_points <= 0:
-            raise ValueError("target/stoploss points must be positive")
-        if self.trail_mode not in ("ema", "points"):
-            raise ValueError("trail_mode must be 'ema' or 'points'")
-        if self.trail_gap_points <= 0 or self.trail_activate_points < 0:
-            raise ValueError("trail gap must be positive and activation non-negative")
+        if not isinstance(self.tf_overrides, dict):
+            raise ValueError("tf_overrides must be an object")
+        clean: dict = {}
+        for tf_s, ov in self.tf_overrides.items():
+            if str(tf_s) not in ("1", "5") or not isinstance(ov, dict):
+                raise ValueError("tf_overrides keys must be '1'/'5' with object values")
+            clean[str(tf_s)] = {k: v for k, v in ov.items() if k in PER_TF_FIELDS}
+        self.tf_overrides = clean
+        for tf in (1, 5):
+            m = self.for_tf(tf)
+            if m.lots < 1:
+                raise ValueError(f"{tf}m: lots must be >= 1")
+            if m.target_points <= 0 or m.stoploss_points <= 0:
+                raise ValueError(f"{tf}m: target/stoploss points must be positive")
+            if m.trail_mode not in ("ema", "points"):
+                raise ValueError(f"{tf}m: trail_mode must be 'ema' or 'points'")
+            if m.trail_gap_points <= 0 or m.trail_activate_points < 0:
+                raise ValueError(f"{tf}m: trail gap must be positive and activation non-negative")
 
 
 def load_strategy_config() -> StrategyConfig:

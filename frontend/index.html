@@ -195,16 +195,32 @@
   </section>
 
   <section class="card">
-    <h2>Activity log</h2>
-    <div class="log" id="log"></div>
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Activity log</h2>
+      <div class="tabs" id="logTabs">
+        <button data-log="all" class="active">All</button>
+        <button data-log="1m">1 min</button>
+        <button data-log="5m">5 min</button>
+        <button data-log="sys">System</button>
+      </div>
+    </div>
+    <div class="log" id="log" style="margin-top:8px"></div>
+    <p class="note" style="margin-bottom:0">Full history is saved per day in
+    <code>data/events-YYYY-MM-DD.log</code> (readable, with a [1m]/[5m] column) and
+    <code>data/events-YYYY-MM-DD.jsonl</code> (structured, for analysis in Python/Excel).</p>
   </section>
 
   <section class="card">
-    <details class="cfg"><summary>Strategy settings</summary>
+    <details class="cfg" open><summary>Strategy settings</summary>
+      <div class="tabs" id="cfgTabs" style="margin-top:10px">
+        <button data-cfgtab="session" class="active">Session</button>
+        <button data-cfgtab="1">1 min strategy</button>
+        <button data-cfgtab="5">5 min strategy</button>
+      </div>
       <div class="cfggrid" id="cfgGrid"></div>
       <div class="row" style="margin-top:12px">
         <button id="btnSaveCfg" class="primary">Save settings</button>
-        <span class="note">Entries use LIMIT orders; SL &amp; square-off exit as MARKET.</span>
+        <span class="note" id="cfgNote"></span>
       </div>
     </details>
   </section>
@@ -305,6 +321,7 @@ function render(){
   $('tCap').textContent = `capital ${rs(s.pnl.capital)}`;
 
   renderPosition(s); renderGates(s); renderTrades(s); renderLog(s);
+  if (!$('cfgGrid').innerHTML) buildCfg();
   drawChart(eng);
 }
 
@@ -346,22 +363,28 @@ function renderGates(s){
                                   : 'Target cutoff (stop after first target)') +
     g(r.consecutive_losses < c.max_consecutive_losses,
       `Consecutive stop-losses: ${r.consecutive_losses}/${c.max_consecutive_losses}`) +
-    g(true, `Flat-EMA filter: ${c.flat_ema_filter
-        ? `on — EMA must move ≥ ${fmt(c.flat_ema_points * 1 / 5, 1)} pts (1m) / ` +
-          `${fmt(c.flat_ema_points, 1)} pts (5m) over ${c.flat_ema_lookback} candles`
-        : 'off'} · decisive close ≥ ${c.decisive_points} pts`) +
-    g(true, `Exits: +${c.target_points} pts target / −${c.stoploss_points} pts stop · square-off ${c.square_off_at}`) +
+    (() => {
+      const eff = tf => { const ov = (c.tf_overrides || {})[tf] || {};
+                          return k => ov[k] !== undefined ? ov[k] : c[k]; };
+      const tfLine = (tf, e) => {
+        const trail = !e('trailing_stop') ? 'trail off'
+          : e('trail_mode') === 'ema' ? 'exit on close across 9-EMA'
+          : `trail +${e('trail_activate_points')}/gap ${e('trail_gap_points')}`;
+        const flat = e('flat_ema_filter')
+          ? `flat ≥ ${fmt(e('flat_ema_points') * tf / 5, 1)} pts/${e('flat_ema_lookback')}c` : 'flat off';
+        return g(true, `${tf}m: decisive ≥ ${e('decisive_points')} pts · ${flat} · ` +
+          `+${e('target_points')}/−${e('stoploss_points')} pts · ${trail} · ${e('lots')} lot(s)`);
+      };
+      return tfLine(1, eff('1')) + tfLine(5, eff('5'));
+    })() +
+    g(true, `Square-off ${c.square_off_at} · no entries after ${c.no_entries_after}`) +
     g(true, `Opening warm-up: ${c.skip_first_cross
         ? `on — a first cross before ${c.skip_first_cross_before} is not traded ` +
           `(entries from the 2nd cross); a later first cross trades normally`
         : 'off — opening crosses can trade'}`) +
     g(true, `Position slots: ${c.per_timeframe_positions
         ? 'one per timeframe — 1m and 5m can hold simultaneously'
-        : 'single, shared across timeframes'}`) +
-    g(true, `Trailing exit: ${!c.trailing_stop ? 'off'
-        : c.trail_mode === 'ema'
-          ? 'on — exit when a candle CLOSES across the 9-EMA (close-confirmed, not tick; target & hard stop still apply)'
-          : `on — arms at +${c.trail_activate_points} pts, trails high by ${c.trail_gap_points} pts`}`);
+        : 'single, shared across timeframes'}`);
 }
 
 function renderTrades(s){
@@ -378,9 +401,19 @@ function renderTrades(s){
     <td>${t.reason}</td><td>${t.entry_time}–${t.exit_time}</td></tr>`).join('');
 }
 
+let logTab = 'all';
+document.querySelectorAll('#logTabs button').forEach(b => b.onclick = () => {
+  logTab = b.dataset.log;
+  document.querySelectorAll('#logTabs button').forEach(x =>
+    x.className = x.dataset.log === logTab ? 'active' : '');
+  if (state) renderLog(state);
+});
 function renderLog(s){
-  $('log').innerHTML = s.events.map(e =>
-    `<div class="${e.kind}"><b>${e.ts}</b>${e.msg}</div>`).join('');
+  const evs = s.events.filter(e =>
+    logTab === 'all' ? true : logTab === 'sys' ? !e.tf : e.tf === logTab);
+  $('log').innerHTML = evs.map(e =>
+    `<div class="${e.kind}"><b>${e.ts}</b>${e.tf ? `<b>[${e.tf}]</b>` : ''}${e.msg}</div>`)
+    .join('') || '<div class="note">No events for this filter yet.</div>';
 }
 
 // ---------- line chart (SVG, hover crosshair; deliberately not candlesticks) ----------
@@ -566,58 +599,78 @@ function renderBacktest(r){
     `<p class="note">Assumptions: ${r.assumptions.join('; ')}.</p>`;
 }
 
-// ---------- settings ----------
-const CFG_FIELDS = [
-  ['ema_period','EMA period','number'], ['candle_grace_sec','Candle finalize grace (s)','number'],
-  ['decisive_points','Decisive close (pts)','number'],
-  ['target_points','Target (+pts)','number'], ['stoploss_points','Stop-loss (−pts)','number'],
-  ['trail_activate_points','Trail arms at (+pts)','number'],
-  ['trail_gap_points','Trail gap (pts)','number'],
-  ['lots','Lots','number'], ['premium_band_low','Premium band low ₹','number'],
-  ['premium_band_high','Premium band high ₹','number'], ['delta_low','Delta low','number'],
-  ['delta_high','Delta high','number'], ['max_trades_per_day','Max trades/day','number'],
-  ['max_consecutive_losses','Max consecutive SL','number'],
-  ['flat_ema_points','Flat-EMA threshold (pts)','number'],
-  ['skip_first_cross_before','Skip 1st cross before (HH:MM)','text'],
-  ['midday_block_start','Block start (HH:MM)','text'], ['midday_block_end','Block end (HH:MM)','text'],
-  ['no_entries_after','No entries after (HH:MM)','text'], ['square_off_at','Square off at (HH:MM)','text'],
-  ['entry_limit_buffer','Entry limit buffer ₹','number'],
-  ['entry_fill_timeout_sec','Entry fill timeout (s)','number'],
-  ['round_trip_charges','Round-trip charges ₹','number'], ['capital','Capital ₹','number'],
+// ---------- settings: Session tab (shared) + per-timeframe tabs ----------
+const SESSION_NUM = [
+  ['capital','Capital ₹'], ['max_risk_capital_per_trade','Risk capital/trade ₹'],
+  ['max_trades_per_day','Max trades/day (shared)'], ['max_consecutive_losses','Max consecutive SL (shared)'],
+  ['round_trip_charges','Round-trip charges ₹'], ['candle_grace_sec','Candle finalize grace (s)'],
 ];
-let cfgBuilt = false;
+const SESSION_TXT = [
+  ['skip_first_cross_before','Skip 1st cross before (HH:MM)'],
+  ['midday_block_start','Block start (HH:MM)'], ['midday_block_end','Block end (HH:MM)'],
+  ['no_entries_after','No entries after (HH:MM)'], ['square_off_at','Square off at (HH:MM)'],
+];
+const SESSION_CHK = [
+  ['skip_first_cross','Skip first cross of day'], ['midday_block','Mid-day block'],
+  ['stop_after_target','Stop after target'], ['per_timeframe_positions','Position per timeframe'],
+];
+const TF_NUM = [
+  ['ema_period','EMA period'], ['decisive_points','Decisive close (pts)'],
+  ['flat_ema_points','Flat-EMA threshold (pts, 5m scale)'], ['flat_ema_lookback','Flat-EMA lookback (candles)'],
+  ['target_points','Target (+pts)'], ['stoploss_points','Stop-loss (−pts)'],
+  ['trail_activate_points','Trail arms at (+pts)'], ['trail_gap_points','Trail gap (pts)'],
+  ['lots','Lots'], ['max_itm_strikes','Max ITM strikes'],
+  ['premium_band_low','Premium band low ₹'], ['premium_band_high','Premium band high ₹'],
+  ['delta_low','Delta low'], ['delta_high','Delta high'],
+  ['entry_limit_buffer','Entry limit buffer ₹'], ['entry_fill_timeout_sec','Entry fill timeout (s)'],
+];
+const TF_CHK = [['flat_ema_filter','Flat-EMA filter'], ['trailing_stop','Trailing exit']];
+let cfgTab = 'session';
+const SEL_STYLE = 'width:100%;padding:5px 8px;font:inherit;border:1px solid var(--border);' +
+                  'border-radius:6px;background:var(--page);color:var(--ink)';
+document.querySelectorAll('#cfgTabs button').forEach(b => b.onclick = () => {
+  cfgTab = b.dataset.cfgtab;
+  document.querySelectorAll('#cfgTabs button').forEach(x =>
+    x.className = x.dataset.cfgtab === cfgTab ? 'active' : '');
+  buildCfg();
+});
+function effVal(k){
+  const ov = (state.config.tf_overrides || {})[cfgTab] || {};
+  return ov[k] !== undefined ? ov[k] : state.config[k];
+}
 function buildCfg(){
-  if (cfgBuilt || !state) return; cfgBuilt = true;
-  $('cfgGrid').innerHTML = CFG_FIELDS.map(([k,label,type]) =>
-    `<label>${label}<input data-k="${k}" type="${type}" step="any"
-       value="${state.config[k]}"></label>`).join('') +
-    `<label>Trail mode<select data-k="trail_mode" style="width:100%;padding:5px 8px;font:inherit;
-        border:1px solid var(--border);border-radius:6px;background:var(--page);color:var(--ink)">
-       <option value="ema" ${state.config.trail_mode==='ema'?'selected':''}>EMA touch (spot)</option>
-       <option value="points" ${state.config.trail_mode==='points'?'selected':''}>Points gap (premium)</option>
-     </select></label>` +
-    `<label>Skip first cross of day<br><input data-k="skip_first_cross" type="checkbox"
-       ${state.config.skip_first_cross?'checked':''}></label>` +
-    `<label>Position per timeframe<br><input data-k="per_timeframe_positions" type="checkbox"
-       ${state.config.per_timeframe_positions?'checked':''}></label>` +
-    `<label>Trailing exit<br><input data-k="trailing_stop" type="checkbox"
-       ${state.config.trailing_stop?'checked':''}></label>` +
-    `<label>Flat-EMA filter<br><input data-k="flat_ema_filter" type="checkbox"
-       ${state.config.flat_ema_filter?'checked':''}></label>` +
-    `<label>Stop after target<br><input data-k="stop_after_target" type="checkbox"
-       ${state.config.stop_after_target?'checked':''}></label>` +
-    `<label>Mid-day block<br><input data-k="midday_block" type="checkbox"
-       ${state.config.midday_block?'checked':''}></label>`;
+  if (!state) return;
+  const num = (k, label, v) => `<label>${label}<input data-k="${k}" type="number" step="any" value="${v}"></label>`;
+  const txt = (k, label, v) => `<label>${label}<input data-k="${k}" type="text" value="${v}"></label>`;
+  const chk = (k, label, v) => `<label>${label}<br><input data-k="${k}" type="checkbox" ${v?'checked':''}></label>`;
+  if (cfgTab === 'session') {
+    $('cfgGrid').innerHTML =
+      SESSION_NUM.map(([k,l]) => num(k, l, state.config[k])).join('') +
+      SESSION_TXT.map(([k,l]) => txt(k, l, state.config[k])).join('') +
+      SESSION_CHK.map(([k,l]) => chk(k, l, state.config[k])).join('');
+    $('cfgNote').textContent = 'Session-wide settings, shared by both timeframes.';
+  } else {
+    $('cfgGrid').innerHTML =
+      TF_NUM.map(([k,l]) => num(k, l, effVal(k))).join('') +
+      `<label>Trail mode<select data-k="trail_mode" style="${SEL_STYLE}">
+         <option value="ema" ${effVal('trail_mode')==='ema'?'selected':''}>EMA touch (spot)</option>
+         <option value="points" ${effVal('trail_mode')==='points'?'selected':''}>Points gap (premium)</option>
+       </select></label>` +
+      TF_CHK.map(([k,l]) => chk(k, l, effVal(k))).join('');
+    $('cfgNote').textContent = `These values apply to the ${cfgTab}-minute engine only.`;
+  }
 }
 document.querySelector('details.cfg').addEventListener('toggle', buildCfg);
 $('btnSaveCfg').onclick = async () => {
-  const body = {};
+  const vals = {};
   document.querySelectorAll('#cfgGrid input, #cfgGrid select').forEach(inp => {
     const k = inp.dataset.k;
-    body[k] = inp.type === 'checkbox' ? inp.checked
+    vals[k] = inp.type === 'checkbox' ? inp.checked
             : inp.type === 'number' ? Number(inp.value) : inp.value;
   });
-  try { await post('/api/config', body); toast('Settings saved.'); cfgBuilt=false; refresh(); }
+  const body = cfgTab === 'session' ? vals
+    : {tf_overrides: {...(state.config.tf_overrides || {}), [cfgTab]: vals}};
+  try { await post('/api/config', body); toast('Settings saved.'); refresh(); }
   catch(e){ toast(e.message); }
 };
 </script>

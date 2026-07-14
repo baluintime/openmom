@@ -42,7 +42,17 @@ with a web dashboard frontend.
 
 Every threshold above is editable in the dashboard's **Strategy settings**
 panel and persists across restarts (as does the day's risk state, so a restart
-cannot reset the daily limits).
+cannot reset the daily limits). Settings are split into three tabs: **Session**
+(shared: capital, daily limits, mid-day block, warm-up, square-off, charges)
+and **1 min / 5 min strategy** — each timeframe has its own EMA period,
+decisive margin, flat filter, target/stop, trailing exit, lots and contract
+selection, stored as overrides in `tf_overrides` and honoured by both the live
+engine and the backtester.
+
+The activity log is timeframe-tagged (filter tabs: All / 1 min / 5 min /
+System) and captured per day to two files for analysis: human-readable
+`data/events-YYYY-MM-DD.log` and structured `data/events-YYYY-MM-DD.jsonl`
+(one JSON object per line: ts, tf, kind, msg).
 
 ## Setup
 
