@@ -445,16 +445,30 @@ class Engine:
         ema = feed.ema[-1]
         candle = feed.candles[-1]
         pos["ema_level"] = round(ema, 2)
-        pos["ema_close"] = round(candle.close, 2)
-        pos["ema_candle"] = candle.ts.strftime("%H:%M")
         if pos["option"]["side"] == "CE":
             return candle.close <= ema
         return candle.close >= ema
+
+    def _capture_spot_context(self, pos: dict) -> None:
+        """Latest completed candle close + 9-EMA of the trade's timeframe,
+        kept on the position so every exit can log its evidence."""
+        feed = self.feeds.get(pos["tf"])
+        if feed and feed.candles and feed.ema and feed.ema[-1] is not None:
+            pos["last_candle"] = feed.candles[-1].ts.strftime("%H:%M")
+            pos["last_close"] = round(feed.candles[-1].close, 2)
+            pos["last_ema"] = round(feed.ema[-1], 2)
+
+    def _spot_evidence(self, pos: dict) -> str:
+        if pos.get("last_close") is None:
+            return ""
+        return (f" — {pos['tf']}m candle {pos.get('last_candle')} close "
+                f"{pos['last_close']:.2f} / 9-EMA {pos['last_ema']:.2f}")
 
     async def _manage_position(self, pos: dict, now: datetime, ltp: float | None) -> None:
         if ltp is not None and ltp > 0:  # capture the excursion since entry
             pos["high"] = max(pos["high"], ltp)
             pos["low"] = min(pos["low"], ltp)
+        self._capture_spot_context(pos)
         stop_price, stop_reason = self._effective_stop(pos)
         ema_touched = self._ema_touched(pos)
         exit_order: BrokerOrder | None = pos.get("exit_order")
@@ -512,14 +526,10 @@ class Engine:
             pos["exit_order"] = order
             pos["exit_reason"] = reason
             self._save_positions()
-            evidence = ""
-            if reason == "ema_touch" and pos.get("ema_close") is not None:
-                evidence = (f" — {pos['tf']}m candle {pos.get('ema_candle')} closed "
-                            f"{pos['ema_close']:.2f} vs 9-EMA {pos['ema_level']:.2f}")
             self.log("order", f"EXIT ({reason}) SELL {order_type} {pos['qty']} × "
                               f"{pos['option']['trading_symbol']}"
                               + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else "")
-                              + evidence,
+                              + self._spot_evidence(pos),
                      tf=pos["tf"])
             # settle immediately when possible (paper MARKET fills at the
             # current LTP) so a reversal signal can take the slot this tick
@@ -551,10 +561,13 @@ class Engine:
             "points": round(pnl_points, 2), "gross_rs": round(gross, 2),
             "charges_rs": round(charges, 2), "net_rs": round(gross - charges, 2),
             "reason": reason,
+            "exit_spot_close": pos.get("last_close"),
+            "exit_spot_ema": pos.get("last_ema"),
         }
         self._append_trade(trade)
         self.log("trade", f"EXITED {trade['symbol']} @ ₹{exit_price:.2f} "
-                          f"({reason}) — {pnl_points:+.2f} pts, net ₹{trade['net_rs']:+,.2f}",
+                          f"({reason}) — {pnl_points:+.2f} pts, net ₹{trade['net_rs']:+,.2f}"
+                          + self._spot_evidence(pos),
                  tf=pos["tf"])
         if hit_target and self.cfg.stop_after_target:
             self.log("risk", "Target achieved — terminal deactivated for the day")
