@@ -222,7 +222,11 @@ class Engine:
         new_by_tf: dict[int, list] = {}
         if self.risk.market_hours(now) or not self.feeds[self.cfg.timeframes[0]].candles:
             for tf in sorted(self.cfg.timeframes, reverse=True):
-                new_by_tf[tf] = await self.feeds[tf].refresh()
+                feed = self.feeds[tf]
+                new_by_tf[tf] = await feed.refresh()
+                if feed.note:   # observed data revision after candle completion
+                    self.log("data", feed.note, tf=tf)
+                    feed.note = None
 
         # --- manage in-flight entry orders ---
         for tf, p in list(self.pendings.items()):

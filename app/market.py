@@ -72,6 +72,8 @@ class SpotFeed:
         self.last_processed_ts: datetime | None = None
         self._seed: list[Candle] = []   # previous sessions, for EMA warm-up
         self._seed_day: str | None = None
+        self._confirm: dict = {}        # newest candle's close from the previous poll
+        self.note: str | None = None    # data-quality observation for the engine log
 
     async def _load_seed(self, now: datetime) -> None:
         """Previous-session candles so the EMA is valid from the first bars of today."""
@@ -99,6 +101,22 @@ class SpotFeed:
         # counts as complete grace_sec after it ends.
         cutoff = timedelta(minutes=self.tf, seconds=self.grace_sec)
         completed_today = [c for c in today if now >= c.ts + cutoff]
+        # The grace period alone is not sufficient: 5m rows have been observed
+        # still stale 6s after the boundary (a CE was exited off a close that
+        # Upstox later revised 7 pts higher). A just-completed candle is only
+        # trusted once two consecutive polls return the identical close.
+        if completed_today and self.last_processed_ts is not None:
+            newest = completed_today[-1]
+            if newest.ts > self.last_processed_ts:
+                seen = self._confirm.get(newest.ts)
+                self._confirm = {newest.ts: newest.close}
+                if seen is None:
+                    completed_today = completed_today[:-1]   # first sight: confirm next poll
+                elif seen != newest.close:
+                    self.note = (f"candle {newest.ts.strftime('%H:%M')} close revised "
+                                 f"{seen:.2f} → {newest.close:.2f} after completion — "
+                                 f"waiting for stable data")
+                    completed_today = completed_today[:-1]
         self.candles = self._seed + completed_today
         self.ema = ema_series([c.close for c in self.candles], self.ema_period)
         if self.last_processed_ts is None:
