@@ -443,11 +443,13 @@ class Engine:
         if feed is None or not feed.candles or not feed.ema or feed.ema[-1] is None:
             return False
         ema = feed.ema[-1]
-        close = feed.candles[-1].close
+        candle = feed.candles[-1]
         pos["ema_level"] = round(ema, 2)
+        pos["ema_close"] = round(candle.close, 2)
+        pos["ema_candle"] = candle.ts.strftime("%H:%M")
         if pos["option"]["side"] == "CE":
-            return close <= ema
-        return close >= ema
+            return candle.close <= ema
+        return candle.close >= ema
 
     async def _manage_position(self, pos: dict, now: datetime, ltp: float | None) -> None:
         if ltp is not None and ltp > 0:  # capture the excursion since entry
@@ -510,9 +512,14 @@ class Engine:
             pos["exit_order"] = order
             pos["exit_reason"] = reason
             self._save_positions()
+            evidence = ""
+            if reason == "ema_touch" and pos.get("ema_close") is not None:
+                evidence = (f" — {pos['tf']}m candle {pos.get('ema_candle')} closed "
+                            f"{pos['ema_close']:.2f} vs 9-EMA {pos['ema_level']:.2f}")
             self.log("order", f"EXIT ({reason}) SELL {order_type} {pos['qty']} × "
                               f"{pos['option']['trading_symbol']}"
-                              + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else ""),
+                              + (f" @ ₹{price:.2f}" if order_type == "LIMIT" else "")
+                              + evidence,
                      tf=pos["tf"])
             # settle immediately when possible (paper MARKET fills at the
             # current LTP) so a reversal signal can take the slot this tick
