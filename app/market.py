@@ -89,12 +89,41 @@ class SpotFeed:
         except Exception:
             self._seed = []  # EMA will simply need `period` candles of today
 
+    @staticmethod
+    def _aggregate(one_min: list[Candle], tf: int) -> list[Candle]:
+        """Build tf-minute candles from 1-minute candles (NSE opens 09:15,
+        which sits on the 5-minute grid). A bucket is only emitted once its
+        FINAL minute is present — otherwise its close would silently be an
+        earlier minute's close."""
+        buckets: dict[datetime, list[Candle]] = {}
+        for c in one_min:
+            start = c.ts - timedelta(minutes=c.ts.minute % tf,
+                                     seconds=c.ts.second)
+            buckets.setdefault(start, []).append(c)
+        out = []
+        for start in sorted(buckets):
+            cs = sorted(buckets[start], key=lambda c: c.ts)
+            if cs[-1].ts != start + timedelta(minutes=tf - 1):
+                continue  # final minute not published yet: bucket incomplete
+            out.append(Candle(ts=start, open=cs[0].open,
+                              high=max(c.high for c in cs),
+                              low=min(c.low for c in cs),
+                              close=cs[-1].close))
+        return out
+
     async def refresh(self) -> list[Candle]:
         """Fetch today's candles; returns newly *completed* candles since last call."""
         now = datetime.now(TZ)
         await self._load_seed(now)
-        rows = await self.client.intraday_candles(SPOT_INSTRUMENT_KEY, self.tf)
-        today = [Candle.from_api(r) for r in rows]
+        if self.tf > 1:
+            # Upstox's own 5m intraday rows have been observed stale for many
+            # seconds after the boundary (even across two confirming reads);
+            # 1m rows finalize fast, so multi-minute candles are built locally
+            rows = await self.client.intraday_candles(SPOT_INSTRUMENT_KEY, 1)
+            today = self._aggregate([Candle.from_api(r) for r in rows], self.tf)
+        else:
+            rows = await self.client.intraday_candles(SPOT_INSTRUMENT_KEY, self.tf)
+            today = [Candle.from_api(r) for r in rows]
         # A candle stamped ts covers [ts, ts + tf). Upstox finalizes the row a
         # few seconds AFTER the boundary — reading at the exact boundary can
         # return a stale close (observed ~7 pts off on 5m) — so a candle only
