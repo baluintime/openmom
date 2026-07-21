@@ -1,8 +1,8 @@
-"""Candle handling and EMA/signal math for the NIFTY 50 spot chart.
+"""Candle building and SMA/EMA signal logic on the NIFTY 50 spot chart.
 
-The indicator is computed on the underlying spot index only (never on the
-option premium chart, per spec) and signals fire strictly on *completed*
-candles — the "Close" confirmation filter.
+All timeframes are built from 1-minute candles fetched from Upstox (its native
+5m/15m aggregates finalize late and caused chart-vs-execution mismatches).
+Signals use CLOSED-candle values only.
 """
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from .config import IST, SPOT_INSTRUMENT_KEY, StrategyConfig
+from .config import IST, SPOT_INSTRUMENT_KEY, TFConfig
 from .upstox_client import UpstoxClient
 
 TZ = ZoneInfo(IST)
@@ -26,15 +26,24 @@ class Candle:
 
     @classmethod
     def from_api(cls, row: list) -> "Candle":
-        return cls(
-            ts=datetime.fromisoformat(row[0]).astimezone(TZ),
-            open=float(row[1]), high=float(row[2]),
-            low=float(row[3]), close=float(row[4]),
-        )
+        return cls(ts=datetime.fromisoformat(row[0]).astimezone(TZ),
+                   open=float(row[1]), high=float(row[2]),
+                   low=float(row[3]), close=float(row[4]))
+
+
+def sma_series(closes: list[float], period: int) -> list[float | None]:
+    out: list[float | None] = [None] * len(closes)
+    run = 0.0
+    for i, c in enumerate(closes):
+        run += c
+        if i >= period:
+            run -= closes[i - period]
+        if i >= period - 1:
+            out[i] = run / period
+    return out
 
 
 def ema_series(closes: list[float], period: int) -> list[float | None]:
-    """EMA seeded with the SMA of the first `period` closes."""
     out: list[float | None] = [None] * len(closes)
     if len(closes) < period:
         return out
@@ -48,195 +57,128 @@ def ema_series(closes: list[float], period: int) -> list[float | None]:
     return out
 
 
-@dataclass
-class Signal:
-    side: str          # "CE" or "PE"
-    timeframe: int
-    candle_ts: datetime
-    close: float
-    ema: float
-
-
 class SpotFeed:
-    """Fetches real NIFTY 50 spot candles from Upstox for one timeframe and
-    detects 9-EMA decisive-close breakouts on newly completed candles."""
+    """Builds tf-minute candles from live 1-minute data and computes SMA/EMA."""
 
-    def __init__(self, client: UpstoxClient, timeframe_min: int, ema_period: int = 9,
-                 grace_sec: int = 6):
+    def __init__(self, client: UpstoxClient, timeframe: int, grace_sec: int = 6):
         self.client = client
-        self.tf = timeframe_min
-        self.ema_period = ema_period
+        self.tf = timeframe
         self.grace_sec = grace_sec
         self.candles: list[Candle] = []
+        self.sma: list[float | None] = []
         self.ema: list[float | None] = []
         self.last_processed_ts: datetime | None = None
-        self._seed: list[Candle] = []   # previous sessions, for EMA warm-up
+        self._seed: list[Candle] = []
         self._seed_day: str | None = None
-        self._confirm: dict = {}        # newest candle's close from the previous poll
-        self.note: str | None = None    # data-quality observation for the engine log
+        self._confirm: dict = {}
+        self.note: str | None = None
 
     async def _load_seed(self, now: datetime) -> None:
-        """Previous-session candles so the EMA is valid from the first bars of today."""
+        """Previous-session 1-min candles so the averages are valid from the open."""
         day = now.strftime("%Y-%m-%d")
         if self._seed_day == day:
             return
         frm = (now - timedelta(days=7)).strftime("%Y-%m-%d")
         to = (now - timedelta(days=1)).strftime("%Y-%m-%d")
         try:
-            rows = await self.client.historical_candles(SPOT_INSTRUMENT_KEY, self.tf, frm, to)
-            self._seed = [Candle.from_api(r) for r in rows][-60:]
+            rows = await self.client.historical_candles(SPOT_INSTRUMENT_KEY, 1, frm, to)
+            ones = [Candle.from_api(r) for r in rows]
+            self._seed = self._aggregate(ones, self.tf)[-60:]
             self._seed_day = day
         except Exception:
-            self._seed = []  # EMA will simply need `period` candles of today
+            self._seed = []
 
     @staticmethod
     def _aggregate(one_min: list[Candle], tf: int) -> list[Candle]:
-        """Build tf-minute candles from 1-minute candles (NSE opens 09:15,
-        which sits on the 5-minute grid). A bucket is only emitted once its
-        FINAL minute is present — otherwise its close would silently be an
-        earlier minute's close."""
+        """Group 1-minute candles into tf-minute candles. A bucket is emitted
+        only once its FINAL minute is present, so a close is never a partial."""
+        if tf == 1:
+            return list(one_min)
         buckets: dict[datetime, list[Candle]] = {}
         for c in one_min:
-            start = c.ts - timedelta(minutes=c.ts.minute % tf,
-                                     seconds=c.ts.second)
+            start = c.ts - timedelta(minutes=c.ts.minute % tf, seconds=c.ts.second,
+                                     microseconds=c.ts.microsecond)
             buckets.setdefault(start, []).append(c)
         out = []
         for start in sorted(buckets):
             cs = sorted(buckets[start], key=lambda c: c.ts)
             if cs[-1].ts != start + timedelta(minutes=tf - 1):
-                continue  # final minute not published yet: bucket incomplete
+                continue
             out.append(Candle(ts=start, open=cs[0].open,
                               high=max(c.high for c in cs),
-                              low=min(c.low for c in cs),
-                              close=cs[-1].close))
+                              low=min(c.low for c in cs), close=cs[-1].close))
         return out
 
     async def refresh(self) -> list[Candle]:
-        """Fetch today's candles; returns newly *completed* candles since last call."""
+        """Fetch/build candles; return newly completed candles since last call."""
         now = datetime.now(TZ)
         await self._load_seed(now)
-        if self.tf > 1:
-            # Upstox's own 5m intraday rows have been observed stale for many
-            # seconds after the boundary (even across two confirming reads);
-            # 1m rows finalize fast, so multi-minute candles are built locally
-            rows = await self.client.intraday_candles(SPOT_INSTRUMENT_KEY, 1)
-            today = self._aggregate([Candle.from_api(r) for r in rows], self.tf)
-        else:
-            rows = await self.client.intraday_candles(SPOT_INSTRUMENT_KEY, self.tf)
-            today = [Candle.from_api(r) for r in rows]
-        # A candle stamped ts covers [ts, ts + tf). Upstox finalizes the row a
-        # few seconds AFTER the boundary — reading at the exact boundary can
-        # return a stale close (observed ~7 pts off on 5m) — so a candle only
-        # counts as complete grace_sec after it ends.
+        rows = await self.client.intraday_candles(SPOT_INSTRUMENT_KEY, 1)
+        today = self._aggregate([Candle.from_api(r) for r in rows], self.tf)
         cutoff = timedelta(minutes=self.tf, seconds=self.grace_sec)
-        completed_today = [c for c in today if now >= c.ts + cutoff]
-        # The grace period alone is not sufficient: 5m rows have been observed
-        # still stale 6s after the boundary (a CE was exited off a close that
-        # Upstox later revised 7 pts higher). A just-completed candle is only
-        # trusted once two consecutive polls return the identical close.
-        if completed_today and self.last_processed_ts is not None:
-            newest = completed_today[-1]
+        completed = [c for c in today if now >= c.ts + cutoff]
+
+        # a just-completed candle is trusted only after two identical reads
+        if completed and self.last_processed_ts is not None:
+            newest = completed[-1]
             if newest.ts > self.last_processed_ts:
                 seen = self._confirm.get(newest.ts)
                 self._confirm = {newest.ts: newest.close}
                 if seen is None:
-                    completed_today = completed_today[:-1]   # first sight: confirm next poll
+                    completed = completed[:-1]
                 elif seen != newest.close:
-                    self.note = (f"candle {newest.ts.strftime('%H:%M')} close revised "
-                                 f"{seen:.2f} → {newest.close:.2f} after completion — "
-                                 f"waiting for stable data")
-                    completed_today = completed_today[:-1]
-        self.candles = self._seed + completed_today
-        self.ema = ema_series([c.close for c in self.candles], self.ema_period)
+                    self.note = (f"candle {newest.ts:%H:%M} close revised "
+                                 f"{seen:.2f} → {newest.close:.2f} — waiting for stable data")
+                    completed = completed[:-1]
+
+        self.candles = self._seed + completed
+        closes = [c.close for c in self.candles]
+        self.sma = sma_series(closes, self._sma_period)
+        self.ema = ema_series(closes, self._ema_period)
+
         if self.last_processed_ts is None:
-            # first refresh (startup/restart): only the latest candle is "new" —
-            # the morning's history must not be replayed as signals
-            new = completed_today[-1:]
+            new = completed[-1:]
         else:
-            new = [c for c in completed_today if c.ts > self.last_processed_ts]
-        if completed_today:
-            self.last_processed_ts = completed_today[-1].ts
+            new = [c for c in completed if c.ts > self.last_processed_ts]
+        if completed:
+            self.last_processed_ts = completed[-1].ts
         return new
 
-    def flat_threshold(self, cfg: StrategyConfig) -> float:
-        """flat_ema_points is defined on the 5-min chart (per the spec) and
-        scaled linearly for other timeframes — an EMA's slope per candle is
-        proportional to the candle duration, so an unscaled threshold would
-        veto nearly every 1-min crossover."""
-        return cfg.flat_ema_points * self.tf / 5.0
+    # periods are pushed in by the engine before each refresh
+    _sma_period = 20
+    _ema_period = 9
 
-    def evaluate_signal(self, cfg: StrategyConfig,
-                        at: int | None = None) -> tuple[Signal | None, dict]:
-        """Signal on the completed candle at index `at` (default: the latest),
-        plus flat-EMA measurements {flat, move, needed}.
+    def set_periods(self, sma: int, ema: int) -> None:
+        self._sma_period, self._ema_period = sma, ema
 
-        CE: previous close at/below its EMA, latest close decisively above.
-        PE: mirror image below.
-        """
-        flat_info = {"flat": False, "move": None, "needed": self.flat_threshold(cfg),
-                     "raw_side": None, "margin": None, "first_cross": False}
-        end = len(self.candles) if at is None else at + 1
-        closes = [c.close for c in self.candles[:end]]
-        ema = ema_series(closes, cfg.ema_period)
-        if len(closes) < cfg.ema_period + max(2, cfg.flat_ema_lookback + 1):
-            return None, flat_info
-        prev_c, cur_c = closes[-2], closes[-1]
-        prev_e, cur_e = ema[-2], ema[-1]
-        if prev_e is None or cur_e is None:
-            return None, flat_info
+    def signal_state(self) -> dict | None:
+        """State of the latest completed candle: its close, SMA, EMA and the
+        above/below flags. None until enough candles exist."""
+        if not self.candles or self.sma[-1] is None or self.ema[-1] is None:
+            return None
+        c = self.candles[-1]
+        s, e = self.sma[-1], self.ema[-1]
+        return {"ts": c.ts, "close": c.close, "sma": s, "ema": e,
+                "above_both": c.close > s and c.close > e,
+                "below_both": c.close < s and c.close < e,
+                "above_either": c.close > s or c.close > e,
+                "below_either": c.close < s or c.close < e}
 
-        if cfg.flat_ema_filter:
-            ref = ema[-1 - cfg.flat_ema_lookback]
-            if ref is not None:
-                flat_info["move"] = abs(cur_e - ref)
-                flat_info["flat"] = flat_info["move"] < flat_info["needed"]
-
-        # raw cross first, then the decisive-margin qualification — a cross
-        # that fails the margin is surfaced via flat_info so it can be logged
-        side = None
-        if prev_c <= prev_e and cur_c > cur_e:
-            flat_info["raw_side"] = "CE"
-            flat_info["margin"] = cur_c - cur_e
-            if cur_c > cur_e + cfg.decisive_points:
-                side = "CE"
-        elif prev_c >= prev_e and cur_c < cur_e:
-            flat_info["raw_side"] = "PE"
-            flat_info["margin"] = cur_e - cur_c
-            if cur_c < cur_e - cfg.decisive_points:
-                side = "PE"
-        if flat_info["raw_side"] is not None:
-            # is this the session's first price/EMA cross? (crosses on earlier
-            # candles of the signal candle's day, incl. the overnight pair)
-            sig_date = self.candles[end - 1].ts.date()
-            prior = 0
-            for j in range(1, end - 1):
-                if self.candles[j].ts.date() != sig_date:
-                    continue
-                ej, ej1 = ema[j], ema[j - 1]
-                if ej is None or ej1 is None:
-                    continue
-                cj, cj1 = closes[j], closes[j - 1]
-                if (cj1 <= ej1 and cj > ej) or (cj1 >= ej1 and cj < ej):
-                    prior += 1
-            flat_info["first_cross"] = prior == 0
-
-        if side is None:
-            return None, flat_info
-
-        return Signal(side=side, timeframe=self.tf, candle_ts=self.candles[end - 1].ts,
-                      close=cur_c, ema=cur_e), flat_info
-
-    def snapshot(self, points: int = 75) -> dict:
+    def snapshot(self, points: int = 90) -> dict:
         cs = self.candles[-points:]
+        ss = self.sma[-points:]
         es = self.ema[-points:]
+        last = self.candles[-1] if self.candles else None
         return {
             "timeframe": self.tf,
-            "last_candle_ts": self.candles[-1].ts.isoformat() if self.candles else None,
-            "last_close": self.candles[-1].close if self.candles else None,
-            "ema": es[-1] if es and es[-1] is not None else None,
+            "last_ts": last.ts.strftime("%H:%M") if last else None,
+            "last_close": round(last.close, 2) if last else None,
+            "sma": round(self.sma[-1], 2) if self.sma and self.sma[-1] is not None else None,
+            "ema": round(self.ema[-1], 2) if self.ema and self.ema[-1] is not None else None,
             "series": [
                 {"t": c.ts.strftime("%H:%M"), "c": round(c.close, 2),
+                 "s": round(s, 2) if s is not None else None,
                  "e": round(e, 2) if e is not None else None}
-                for c, e in zip(cs, es)
+                for c, s, e in zip(cs, ss, es)
             ],
         }

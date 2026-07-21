@@ -1,4 +1,4 @@
-"""FastAPI application: REST API + the dashboard frontend page."""
+"""FastAPI app: REST API + the dashboard (3 timeframe pages)."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -7,8 +7,7 @@ from pathlib import Path
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 
-from .backtest import Backtester
-from .config import EnvSettings, load_strategy_config, save_strategy_config
+from .config import (EnvSettings, TIMEFRAMES, TFConfig, load_config, save_config)
 from .engine import Engine
 from .upstox_client import UpstoxClient, UpstoxError
 
@@ -16,10 +15,9 @@ FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
 
 env = EnvSettings()
 client = UpstoxClient(env.api_key, env.api_secret, env.redirect_uri)
-engine = Engine(client, load_strategy_config())
-backtester = Backtester(client)
+engine = Engine(client, load_config())
 
-app = FastAPI(title="NIFTY Intraday Options Scalper (Upstox)")
+app = FastAPI(title="NIFTY SMA+EMA Options Scalper (Upstox)")
 
 
 @app.on_event("startup")
@@ -33,7 +31,6 @@ async def index():
 
 
 # ---------------- auth ----------------
-
 @app.get("/api/auth/login")
 async def auth_login():
     if not env.api_key or not env.api_secret:
@@ -66,7 +63,8 @@ async def auth_token(body: dict = Body(...)):
 @app.post("/api/auth/logout")
 async def auth_logout():
     client.clear_token()
-    engine.running = False
+    for t in TIMEFRAMES:
+        engine.engines[t].running = False
     engine.log("auth", "Disconnected from Upstox")
     return {"ok": True}
 
@@ -74,59 +72,42 @@ async def auth_logout():
 @app.get("/api/auth/status")
 async def auth_status():
     info = {"configured": bool(env.api_key and env.api_secret),
-            "token_present": bool(client.access_token),
-            "profile": None}
+            "token_present": bool(client.access_token), "profile": None}
     if client.access_token:
         try:
             p = await client.profile()
             info["profile"] = {"name": p.get("user_name"), "user_id": p.get("user_id"),
                                "broker": p.get("broker")}
         except UpstoxError as e:
-            info["token_present"] = bool(client.access_token)  # cleared on 401
             info["error"] = str(e)
     return info
 
 
-# ---------------- engine control ----------------
-
+# ---------------- status / control ----------------
 @app.get("/api/status")
 async def status():
     return engine.status()
 
 
 @app.post("/api/start")
-async def start():
+async def start(body: dict = Body(...)):
+    tf = int(body.get("tf", 0))
+    if tf not in TIMEFRAMES:
+        raise HTTPException(400, "tf must be 1, 5 or 15")
     try:
-        engine.start()
+        engine.start(tf)
     except UpstoxError as e:
         raise HTTPException(400, str(e))
-    return {"running": True}
+    return {"tf": tf, "running": True}
 
 
 @app.post("/api/stop")
-async def stop():
-    engine.stop()
-    return {"running": False}
-
-
-@app.post("/api/squareoff")
-async def squareoff():
-    if not engine.positions:
-        raise HTTPException(400, "No open position")
-    engine.request_squareoff()
-    return {"ok": True}
-
-
-@app.post("/api/mode")
-async def set_mode(body: dict = Body(...)):
-    mode = body.get("mode", "")
-    if mode not in ("paper", "live"):
-        raise HTTPException(400, "mode must be 'paper' or 'live'")
-    try:
-        engine.set_mode(mode)
-    except (UpstoxError, ValueError) as e:
-        raise HTTPException(400, str(e))
-    return {"mode": engine.cfg.mode}
+async def stop(body: dict = Body(...)):
+    tf = int(body.get("tf", 0))
+    if tf not in TIMEFRAMES:
+        raise HTTPException(400, "tf must be 1, 5 or 15")
+    engine.stop(tf)
+    return {"tf": tf, "running": False}
 
 
 @app.get("/api/config")
@@ -137,60 +118,32 @@ async def get_config():
 @app.post("/api/config")
 async def set_config(body: dict = Body(...)):
     cfg = engine.cfg
-    editable = {
-        "timeframes", "per_timeframe_positions", "ema_period", "candle_grace_sec",
-        "decisive_points", "skip_first_cross", "skip_first_cross_before", "flat_ema_filter",
-        "flat_ema_points", "flat_ema_lookback", "lots", "capital",
-        "max_risk_capital_per_trade", "premium_band_low", "premium_band_high",
-        "delta_low", "delta_high", "max_itm_strikes", "target_points",
-        "stoploss_points", "trailing_stop", "trail_mode", "trail_activate_points",
-        "trail_gap_points", "max_trades_per_day", "stop_after_target",
-        "max_consecutive_losses", "midday_block", "midday_block_start",
-        "midday_block_end", "no_entries_after", "square_off_at",
-        "entry_limit_buffer", "entry_fill_timeout_sec", "round_trip_charges",
-        "tf_overrides",
-    }
-    old = asdict(cfg)
-    for k, v in body.items():
-        if k in editable:
-            setattr(cfg, k, v)
+    for k in ("capital", "round_trip_charges", "no_entries_after",
+              "square_off_at", "candle_grace_sec"):
+        if k in body:
+            setattr(cfg, k, body[k])
+    if "tf" in body and isinstance(body["tf"], dict):
+        for tk, tv in body["tf"].items():
+            if tk in cfg.tf and isinstance(tv, dict):
+                merged = dict(cfg.tf[tk])
+                merged.update({k: v for k, v in tv.items() if k in merged})
+                try:
+                    TFConfig(**merged).validate()
+                except (ValueError, TypeError) as e:
+                    raise HTTPException(400, f"{tk}m: {e}")
+                cfg.tf[tk] = merged
     try:
         cfg.validate()
     except ValueError as e:
-        for k, v in old.items():
-            setattr(cfg, k, v)
         raise HTTPException(400, str(e))
-    save_strategy_config(cfg)
-    engine._sync_feeds()
-    engine.log("config", "Strategy parameters updated")
+    save_config(cfg)
+    engine.log("config", "Settings updated")
     return asdict(cfg)
 
 
 @app.get("/api/trades")
 async def trades():
     return engine.trades
-
-
-# ---------------- backtesting (real historical data) ----------------
-
-@app.post("/api/backtest/run")
-async def backtest_run(body: dict = Body(default={})):
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    yesterday = (datetime.now(ZoneInfo("Asia/Kolkata")).date() - timedelta(days=1))
-    to_date = body.get("to_date") or yesterday.isoformat()
-    from_date = body.get("from_date") or (yesterday - timedelta(days=30)).isoformat()
-    tfs = body.get("timeframes") or engine.cfg.timeframes
-    try:
-        backtester.start(engine.cfg, from_date, to_date, tfs)
-    except (UpstoxError, ValueError) as e:
-        raise HTTPException(400, str(e))
-    return {"started": True, "from": from_date, "to": to_date, "timeframes": tfs}
-
-
-@app.get("/api/backtest/status")
-async def backtest_status():
-    return backtester.status()
 
 
 def main() -> None:
