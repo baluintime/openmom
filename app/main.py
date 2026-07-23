@@ -5,10 +5,10 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
-from .config import (EnvSettings, TIMEFRAMES, TFConfig, load_config, save_config)
-from .engine import Engine
+from .config import (DATA_DIR, EnvSettings, TIMEFRAMES, TFConfig, load_config, save_config)
+from .engine import Engine, TRADES_FILE
 from .upstox_client import UpstoxClient, UpstoxError
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
@@ -144,6 +144,72 @@ async def set_config(body: dict = Body(...)):
 @app.get("/api/trades")
 async def trades():
     return engine.trades
+
+
+EXPORT_COLUMNS = [
+    ("day", "Day"), ("tf", "Timeframe"), ("mode", "Mode"),
+    ("strategy", "Strategy #"), ("strategy_name", "Strategy"), ("side", "Side"),
+    ("symbol", "Contract"), ("strike", "Strike"), ("qty", "Qty"),
+    ("entry_time", "Entry Time"), ("exit_time", "Exit Time"),
+    ("entry", "Entry Premium"), ("exit", "Exit Premium"),
+    ("entry_index", "Index @ Entry"), ("exit_index", "Index @ Exit"),
+    ("index_points", "Index Points"), ("points", "Premium Points"),
+    ("gross_rs", "Gross ₹"), ("charges_rs", "Charges ₹"), ("net_rs", "Net ₹"),
+    ("reason", "Exit Reason"),
+]
+
+
+def _all_trades() -> list[dict]:
+    out = []
+    if TRADES_FILE.exists():
+        import json
+        for line in TRADES_FILE.read_text().splitlines():
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    return out
+
+
+@app.get("/api/trades.xlsx")
+async def trades_xlsx(scope: str = "all"):
+    rows = engine.trades if scope == "today" else _all_trades()
+    keys = [k for k, _ in EXPORT_COLUMNS]
+    headers = [h for _, h in EXPORT_COLUMNS]
+    fname = f"nifty-trades-{'today' if scope == 'today' else 'all'}.xlsx"
+    try:
+        from io import BytesIO
+        from openpyxl import Workbook
+        from openpyxl.styles import Font
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Trades"
+        ws.append(headers)
+        for c in ws[1]:
+            c.font = Font(bold=True)
+        for t in rows:
+            ws.append([t.get(k) for k in keys])
+        ws.freeze_panes = "A2"
+        for i, h in enumerate(headers, 1):
+            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = max(11, len(h) + 2)
+        buf = BytesIO()
+        wb.save(buf)
+        return Response(
+            buf.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+    except ImportError:
+        # openpyxl not installed — fall back to CSV (opens in Excel)
+        import csv
+        import io
+        sio = io.StringIO()
+        w = csv.writer(sio)
+        w.writerow(headers)
+        for t in rows:
+            w.writerow([t.get(k) for k in keys])
+        return Response(sio.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition":
+                                 f'attachment; filename="{fname[:-5]}.csv"'})
 
 
 def main() -> None:

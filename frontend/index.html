@@ -169,11 +169,18 @@
   </section>
 
   <section class="card">
-    <h2>Trades (today)</h2>
-    <div style="overflow-x:auto"><table><thead><tr>
+    <div class="row" style="justify-content:space-between">
+      <h2 style="margin:0">Trades (today)</h2>
+      <div class="row">
+        <a href="/api/trades.xlsx?scope=today"><button>⬇ Excel (today)</button></a>
+        <a href="/api/trades.xlsx?scope=all"><button>⬇ Excel (all history)</button></a>
+      </div>
+    </div>
+    <div style="overflow-x:auto;margin-top:8px"><table><thead><tr>
       <th>TF</th><th>Mode</th><th>Strategy</th><th>Side</th><th>Contract</th><th>Qty</th>
-      <th>Entry</th><th>Exit</th><th>Pts</th><th>Net ₹</th><th>Reason</th><th>Time</th>
-    </tr></thead><tbody id="tradeRows"><tr><td colspan="12" class="note">No trades yet today.</td></tr></tbody></table></div>
+      <th>Entry</th><th>Exit</th><th>Idx@Entry</th><th>Idx@Exit</th><th>Idx Pts</th>
+      <th>Pts</th><th>Net ₹</th><th>Reason</th><th>Time</th>
+    </tr></thead><tbody id="tradeRows"><tr><td colspan="15" class="note">No trades yet today.</td></tr></tbody></table></div>
   </section>
 
   <section class="card">
@@ -301,10 +308,12 @@ function renderCmp(c){
 
 function renderTrades(s){
   const tb=$('tradeRows');
-  if(!s.trades.length){tb.innerHTML='<tr><td colspan="12" class="note">No trades yet today.</td></tr>';return;}
+  if(!s.trades.length){tb.innerHTML='<tr><td colspan="15" class="note">No trades yet today.</td></tr>';return;}
   tb.innerHTML=s.trades.map(t=>`<tr>
     <td>${t.tf}</td><td>${t.mode}</td><td><b>${t.strategy_name||('S'+t.strategy)}</b></td><td>${t.side}</td>
     <td>${t.symbol}</td><td>${t.qty}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
+    <td>${t.entry_index!=null?fmt(t.entry_index):'—'}</td><td>${t.exit_index!=null?fmt(t.exit_index):'—'}</td>
+    <td class="${(t.index_points||0)>=0?'pos':'neg'}">${t.index_points!=null?(t.index_points>=0?'+':'')+fmt(t.index_points):'—'}</td>
     <td class="${t.points>=0?'pos':'neg'}">${t.points>=0?'+':''}${fmt(t.points)}</td>
     <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td>
     <td>${t.reason}</td><td>${t.entry_time}–${t.exit_time}</td></tr>`).join('');

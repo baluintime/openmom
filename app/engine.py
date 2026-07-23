@@ -142,12 +142,16 @@ class TFEngine:
         qty = c.lots * ct.lot_size
         order = await self.broker().place(instrument_key=ct.instrument_key,
                                           side="BUY", order_type="MARKET", qty=qty)
+        idx = self.parent.spot_ltp
         self.slots[sid].update({"side": side, "position": {
             "option": asdict(ct), "qty": qty, "order": order,
             "entry_price": None, "ltp": ct.ltp, "entry_ts": now.strftime("%H:%M:%S"),
             "signal_candle": last.ts.strftime("%H:%M"), "exiting": None,
-            "exit_order": None}})
+            "exit_order": None, "entry_index": idx}})
         self.log("trade", f"[{STRATEGIES[sid]['name']}] {side.upper()} entry [{c.mode}] "
+                          f"— index {idx:.2f} · {state} — buy {ct.trading_symbol}"
+                          if idx else
+                          f"[{STRATEGIES[sid]['name']}] {side.upper()} entry [{c.mode}] "
                           f"— {state} — buy {ct.trading_symbol}")
 
     async def _place_exit(self, sid):
@@ -194,6 +198,8 @@ class TFEngine:
         pts = exit_price - entry
         gross = pts * pos["qty"]
         charges = self.parent.cfg.round_trip_charges
+        entry_idx = pos.get("entry_index")
+        exit_idx = self.parent.spot_ltp
         trade = {
             "day": now.strftime("%Y-%m-%d"), "tf": f"{self.tf}m", "mode": c.mode,
             "strategy": sid, "strategy_name": STRATEGIES[sid]["name"],
@@ -202,13 +208,19 @@ class TFEngine:
             "qty": pos["qty"], "entry_time": pos["entry_ts"],
             "exit_time": now.strftime("%H:%M:%S"),
             "entry": round(entry, 2), "exit": round(exit_price, 2),
+            "entry_index": round(entry_idx, 2) if entry_idx else None,
+            "exit_index": round(exit_idx, 2) if exit_idx else None,
+            "index_points": (round(exit_idx - entry_idx, 2)
+                             if (entry_idx and exit_idx) else None),
             "points": round(pts, 2), "gross_rs": round(gross, 2),
             "charges_rs": round(charges, 2), "net_rs": round(gross - charges, 2),
             "reason": pos.get("exiting"),
         }
         self.parent.record_trade(trade)
         self.log("trade", f"[{STRATEGIES[sid]['name']}] EXITED {trade['symbol']} "
-                          f"@ ₹{exit_price:.2f} — {pts:+.2f} pts, net ₹{trade['net_rs']:+,.2f}")
+                          f"@ ₹{exit_price:.2f}"
+                          + (f" · index {exit_idx:.2f}" if exit_idx else "")
+                          + f" — {pts:+.2f} pts, net ₹{trade['net_rs']:+,.2f}")
 
     def status(self):
         c = self.cfg()
