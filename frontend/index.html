@@ -111,12 +111,13 @@
         <span id="runBadge" class="badge off">STOPPED</span>
       </div>
       <div class="row">
-        <label class="opt"><input type="radio" name="mode" value="paper"> Paper</label>
+        <label class="opt"><input type="radio" name="mode" value="paper"> Paper (all 3)</label>
         <label class="opt"><input type="radio" name="mode" value="live"> Live</label>
-        <span class="note">Live contract:</span>
-        <select id="liveContract" style="padding:5px 8px;border:1px solid var(--border);
+        <span class="note">Live strategy:</span>
+        <select id="liveStrategy" style="padding:5px 8px;border:1px solid var(--border);
            border-radius:6px;background:var(--page);color:var(--ink)">
-          <option value="ATM">ATM</option><option value="ITM">ITM</option></select>
+          <option value="1">S1 · MA Zone</option><option value="2">S2 · MA Momentum</option>
+          <option value="3">S3 · Price Crossover</option></select>
       </div>
     </div>
     <div id="strategyLine" class="note" style="margin-top:8px"></div>
@@ -145,7 +146,7 @@
   </section>
 
   <section class="card">
-    <h2>Open position (this timeframe)</h2>
+    <h2>Open positions (this timeframe · one per strategy)</h2>
     <div id="position"><span class="note">No open position.</span></div>
   </section>
 
@@ -161,18 +162,18 @@
 
   <!-- shared -->
   <section class="card">
-    <h2>ATM vs ITM comparison (all paper legs, today)</h2>
-    <div class="cmp" id="cmp"></div>
-    <p class="note" style="margin-bottom:0">Both legs enter and exit on the same spot signal, so timing
-    is identical — only the contract differs. Net is after ₹ charges per round trip.</p>
+    <h2>Strategy comparison (all paper trades, today · all timeframes)</h2>
+    <div class="cmp" id="cmp" style="grid-template-columns:repeat(3,1fr)"></div>
+    <p class="note" style="margin-bottom:0">All three strategies trade the ATM option on the same
+    SMA/EMA. Net is after ₹ charges per round trip. The leader (highest net) is highlighted.</p>
   </section>
 
   <section class="card">
     <h2>Trades (today)</h2>
     <div style="overflow-x:auto"><table><thead><tr>
-      <th>TF</th><th>Mode</th><th>Kind</th><th>Side</th><th>Contract</th><th>Qty</th>
-      <th>Entry</th><th>Exit</th><th>Pts</th><th>Net ₹</th><th>Δ</th><th>OI</th><th>Reason</th><th>Time</th>
-    </tr></thead><tbody id="tradeRows"><tr><td colspan="14" class="note">No trades yet today.</td></tr></tbody></table></div>
+      <th>TF</th><th>Mode</th><th>Strategy</th><th>Side</th><th>Contract</th><th>Qty</th>
+      <th>Entry</th><th>Exit</th><th>Pts</th><th>Net ₹</th><th>Reason</th><th>Time</th>
+    </tr></thead><tbody id="tradeRows"><tr><td colspan="12" class="note">No trades yet today.</td></tr></tbody></table></div>
   </section>
 
   <section class="card">
@@ -251,10 +252,11 @@ function render(){
   $('runBadge').textContent=e.running?'RUNNING':'STOPPED';
   $('runBadge').className='badge '+(e.running?'on':'off');
   document.querySelectorAll('input[name=mode]').forEach(r=>r.checked=r.value===c.mode);
-  $('liveContract').value=c.live_contract;
+  $('liveStrategy').value=c.live_strategy;
+  const sname=(state.strategies&&state.strategies[c.live_strategy])?state.strategies[c.live_strategy].name:('S'+c.live_strategy);
   $('strategyLine').textContent=`${curTf}m · ${c.mode.toUpperCase()} · SMA ${c.sma_period} & EMA ${c.ema_period}`
     +` · ${c.lots} lot(s) · long=CE / short=PE · `
-    +(c.mode==='paper'?'paper opens ATM + ITM for comparison':`live trades ${c.live_contract}`);
+    +(c.mode==='paper'?'paper runs all 3 strategies (ATM) for comparison':`live trades ${sname}`);
   // tiles
   $('tClose').textContent=fmt(f.last_close);
   $('tCandle').textContent=f.last_ts?'candle '+f.last_ts:'';
@@ -275,39 +277,36 @@ function render(){
 
 function renderPosition(e){
   const el=$('position');
-  if(!e.position){el.innerHTML='<span class="note">No open position.</span>';return;}
-  const p=e.position;
-  let h=`<div class="note" style="margin-bottom:8px">${p.side.toUpperCase()} (${p.opt_side}) ·
-    signal candle ${p.signal_candle} · entered ${p.entry_time}${p.exiting?` · EXITING (${p.exiting})`:''}</div>`;
-  h+='<div style="overflow-x:auto"><table><thead><tr><th>Leg</th><th>Contract</th><th>Qty</th>'
-    +'<th>Entry</th><th>LTP</th><th>Δ</th><th>OI</th><th>Spread%</th><th>Unrealized</th></tr></thead><tbody>';
-  p.legs.forEach(l=>{ const cls=l.unreal_rs>=0?'pos':'neg';
-    h+=`<tr><td><b>${l.kind}</b></td><td>${l.symbol}</td><td>${l.qty}</td>
-      <td>${l.entry!=null?fmt(l.entry):'…'}</td><td>${fmt(l.ltp)}</td>
-      <td>${l.delta!=null?fmt(l.delta):'—'}</td><td>${l.oi!=null?fmt(l.oi,0):'—'}</td>
-      <td>${l.spread_pct!=null?fmt(l.spread_pct,1):'—'}</td>
-      <td class="${cls}"><b>${l.unreal_pts>=0?'+':''}${fmt(l.unreal_pts)} (${rs(l.unreal_rs)})</b></td></tr>`;});
+  if(!e.positions||!e.positions.length){el.innerHTML='<span class="note">No open position.</span>';return;}
+  let h='<div style="overflow-x:auto"><table><thead><tr><th>Strategy</th><th>Side</th><th>Contract</th>'
+    +'<th>Qty</th><th>Entry</th><th>LTP</th><th>Unrealized</th><th>Since</th></tr></thead><tbody>';
+  e.positions.forEach(p=>{const cls=p.unreal_rs>=0?'pos':'neg';
+    h+=`<tr><td><b>${p.strategy_name}</b></td><td>${p.side}${p.exiting?` · EXIT(${p.exiting})`:''}</td>
+      <td>${p.symbol}</td><td>${p.qty}</td><td>${p.entry!=null?fmt(p.entry):'…'}</td><td>${fmt(p.ltp)}</td>
+      <td class="${cls}"><b>${p.unreal_pts>=0?'+':''}${fmt(p.unreal_pts)} (${rs(p.unreal_rs)})</b></td>
+      <td>${p.entry_time}</td></tr>`;});
   h+='</tbody></table></div>'; el.innerHTML=h;
 }
 
 function renderCmp(c){
-  const box=(k,d,win)=>`<div class="box ${win?'win':''}">
-    <div class="row" style="justify-content:space-between"><b>${k}</b>
+  const box=(d,win)=>`<div class="box ${win?'win':''}">
+    <div class="row" style="justify-content:space-between"><b>${d.name}</b>
       ${win?'<span class="badge on">leading</span>':''}</div>
     <div class="v ${d.net>=0?'pos':'neg'}" style="font-size:22px;font-weight:650;margin:4px 0">${rs(d.net)}</div>
-    <div class="note">${d.trades} trades · ${d.win_rate}% win · ${d.points>=0?'+':''}${fmt(d.points)} pts</div></div>`;
-  $('cmp').innerHTML=box('ATM',c.ATM,c.leader==='ATM')+box('ITM',c.ITM,c.leader==='ITM');
+    <div class="note">${d.trades} trades · ${d.win_rate}% win · ${d.points>=0?'+':''}${fmt(d.points)} pts</div>
+    <div class="note" style="margin-top:6px">${d.desc}</div></div>`;
+  const st=c.strategies;
+  $('cmp').innerHTML=[1,2,3].map(sid=>box(st[sid],c.leader===sid)).join('');
 }
 
 function renderTrades(s){
   const tb=$('tradeRows');
-  if(!s.trades.length){tb.innerHTML='<tr><td colspan="14" class="note">No trades yet today.</td></tr>';return;}
+  if(!s.trades.length){tb.innerHTML='<tr><td colspan="12" class="note">No trades yet today.</td></tr>';return;}
   tb.innerHTML=s.trades.map(t=>`<tr>
-    <td>${t.tf}</td><td>${t.mode}</td><td><b>${t.kind}</b></td><td>${t.side}</td>
+    <td>${t.tf}</td><td>${t.mode}</td><td><b>${t.strategy_name||('S'+t.strategy)}</b></td><td>${t.side}</td>
     <td>${t.symbol}</td><td>${t.qty}</td><td>${fmt(t.entry)}</td><td>${fmt(t.exit)}</td>
     <td class="${t.points>=0?'pos':'neg'}">${t.points>=0?'+':''}${fmt(t.points)}</td>
     <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td>
-    <td>${t.delta!=null?fmt(t.delta):'—'}</td><td>${t.oi!=null?fmt(t.oi,0):'—'}</td>
     <td>${t.reason}</td><td>${t.entry_time}–${t.exit_time}</td></tr>`).join('');
 }
 
@@ -365,7 +364,7 @@ document.querySelectorAll('input[name=mode]').forEach(r=>r.onchange=async()=>{
 $('btnLiveCancel').onclick=()=>{dlgLive.close();refresh();};
 $('btnLiveOk').onclick=async()=>{if($('liveConfirm').value.trim()!=='LIVE'){toast('Type LIVE to confirm.');return;}
   await saveTf({mode:'live'});dlgLive.close();};
-$('liveContract').onchange=()=>saveTf({live_contract:$('liveContract').value});
+$('liveStrategy').onchange=()=>saveTf({live_strategy:Number($('liveStrategy').value)});
 
 async function saveTf(patch){
   try{await post('/api/config',{tf:{[curTf]:patch}});refresh();}catch(e){toast(e.message);refresh();}
@@ -373,20 +372,20 @@ async function saveTf(patch){
 
 // ---- settings ----
 const CFG=[['sma_period','SMA period','number'],['ema_period','EMA period','number'],
-  ['lots','Lots','number'],['itm_max_depth','ITM max depth (strikes)','number'],
-  ['itm_min_delta','ITM min delta','number'],['itm_min_oi','ITM min OI (0=off)','number'],
-  ['itm_max_spread_pct','ITM max spread % (0=off)','number']];
+  ['lots','Lots','number']];
 let cfgBuiltFor=null;
 function buildCfg(c){
   cfgBuiltFor=engKey();
   $('cfgGrid').innerHTML=CFG.map(([k,l,t])=>`<label>${l}<input data-k="${k}" type="${t}" step="any" value="${c[k]}"></label>`).join('')
-    +`<label>Live contract<select data-k="live_contract">
-        <option value="ATM" ${c.live_contract==='ATM'?'selected':''}>ATM</option>
-        <option value="ITM" ${c.live_contract==='ITM'?'selected':''}>ITM</option></select></label>`;
+    +`<label>Live strategy<select data-k="live_strategy">
+        <option value="1" ${c.live_strategy==1?'selected':''}>S1 · MA Zone</option>
+        <option value="2" ${c.live_strategy==2?'selected':''}>S2 · MA Momentum</option>
+        <option value="3" ${c.live_strategy==3?'selected':''}>S3 · Price Crossover</option></select></label>`;
 }
 $('btnSaveCfg').onclick=async()=>{const patch={};
   document.querySelectorAll('#cfgGrid input,#cfgGrid select').forEach(inp=>{
-    patch[inp.dataset.k]=inp.tagName==='SELECT'?inp.value:Number(inp.value);});
+    patch[inp.dataset.k]=inp.dataset.k==='live_strategy'?Number(inp.value)
+      :inp.tagName==='SELECT'?inp.value:Number(inp.value);});
   try{await post('/api/config',{tf:{[curTf]:patch}});toast('Saved.');cfgBuiltFor=null;refresh();}catch(e){toast(e.message);}
 };
 </script>

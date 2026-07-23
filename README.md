@@ -13,33 +13,33 @@ charts, each on its own page.
   averages, so what you see is exactly what it trades on.
 - **Paper or Live**, configurable independently per timeframe.
 
-## Strategy (closed-candle values only)
+## Three strategies compared
 
-Two moving averages on the NIFTY 50 spot close — an SMA and an EMA, periods
-configurable per timeframe:
+All three use the same SMA and EMA on the NIFTY 50 spot close (closed-candle
+values only, periods configurable per timeframe). Long buys a CE, short buys a
+PE — always the **ATM** option. In **paper mode all three run in parallel**, each
+with its own position, so the dashboard's scoreboard compares them
+apples-to-apples. **Live mode** trades one strategy (`live_strategy`).
 
-| | Rule |
-|---|---|
-| **Long entry** (buy CE) | a completed candle **closes above BOTH** the SMA and the EMA |
-| **Long exit** | a completed candle **closes below EITHER** the SMA or the EMA |
-| **Short entry** (buy PE) | a completed candle **closes below BOTH** |
-| **Short exit** | a completed candle **closes above EITHER** |
+**Strategy 1 · MA Zone** (the original)
+- Long (CE): close above **both** SMA and EMA; exit when close below **either**.
+- Short (PE): close below **both**; exit when close above **either**.
 
-Only close values are used — no intrabar/tick triggers. Entries and exits are
-MARKET orders. Forced square-off at 15:15, no new entries after 15:00 (IST).
+**Strategy 2 · MA Momentum**
+- Long (CE): enter when the **EMA crosses above the SMA**; hold while the gap
+  `EMA − SMA` keeps **widening** candle-over-candle; exit as soon as it narrows.
+- Short (PE): enter when the **EMA crosses below the SMA**; hold while `SMA − EMA`
+  widens; exit as soon as it narrows.
 
-## ATM vs ITM comparison (paper mode)
+**Strategy 3 · Price Crossover**
+- Long (CE): enter when the **close crosses above both** the EMA and SMA; exit
+  when the **close crosses below the SMA**.
+- Short (PE): enter when the **close crosses below both**; exit when the **close
+  crosses above the SMA**.
 
-In **paper mode** every signal opens **two legs** — one **ATM** contract and one
-**ITM** contract — that enter and exit on the *same spot signal*, so their
-timing is identical and only the instrument differs. The dashboard shows a live
-**ATM vs ITM** scoreboard (net ₹, win rate, points) so you can see which
-performs better. The ITM leg is chosen from strikes within `itm_max_depth` of
-ATM, ranked by liquidity: highest OI, tightest bid/ask spread, and a delta at or
-above `itm_min_delta`.
-
-In **live mode** each timeframe trades exactly one contract — ATM or ITM, set by
-`live_contract`.
+Entries and exits are MARKET orders. Forced square-off at 15:15, no new entries
+after 15:00 (IST). The scoreboard (net ₹, win rate, points, leader highlighted)
+aggregates all paper trades across all timeframes by strategy.
 
 ## Setup
 
@@ -57,10 +57,9 @@ Upstox tokens expire daily (~3:30 AM IST); reconnect each morning.
 ## Per-timeframe settings
 
 Each of the 1m / 5m / 15m pages has its own: mode (paper/live), SMA period, EMA
-period, lots, live contract (ATM/ITM), and ITM selection controls
-(`itm_max_depth`, `itm_min_delta`, `itm_min_oi`, `itm_max_spread_pct`). Session
-settings (capital, charges, square-off / no-entry times, candle grace) are
-shared and stored in `data/config.json`.
+period, lots, and live strategy (`live_strategy` = 1, 2 or 3). Session settings
+(capital, charges, square-off / no-entry times, candle grace) are shared and
+stored in `data/config.json`.
 
 ## API
 
@@ -78,9 +77,9 @@ shared and stored in `data/config.json`.
 - Activity log is timeframe-tagged with filter tabs (All / 1m / 5m / 15m /
   System) and captured per day to `data/events-YYYY-MM-DD.log` (readable) and
   `data/events-YYYY-MM-DD.jsonl` (structured).
-- Every trade is written to `data/trades.jsonl` with `tf`, `mode`, `kind`
-  (ATM/ITM), `side`, entry/exit, points, net, delta, oi, spread_pct — ready for
-  pandas/Excel analysis of ATM-vs-ITM performance.
+- Every trade is written to `data/trades.jsonl` with `tf`, `mode`, `strategy`
+  (1/2/3), `strategy_name`, `side`, entry/exit, points, net and reason — ready
+  for pandas/Excel analysis of the three-strategy comparison.
 
 ## Disclaimers
 

@@ -52,28 +52,26 @@ class EnvSettings:
 
 @dataclass
 class TFConfig:
-    """Independent settings for one timeframe engine."""
+    """Independent settings for one timeframe engine.
+
+    Paper mode runs all three strategies (1, 2, 3) in parallel for comparison,
+    each trading the ATM option. Live mode trades exactly one strategy.
+    """
     timeframe: int
     enabled: bool = False
     mode: str = "paper"          # "paper" | "live"
     sma_period: int = 20
     ema_period: int = 9
     lots: int = 1
-    # Live mode trades exactly one contract:
-    live_contract: str = "ATM"   # "ATM" | "ITM"
-    # ITM leg selection
-    itm_max_depth: int = 3       # search ATM-1 .. ATM-itm_max_depth strikes ITM
-    itm_min_delta: float = 0.55  # ITM options should have |delta| at least this
-    itm_min_oi: float = 0.0      # skip strikes with OI below this (0 = no floor)
-    itm_max_spread_pct: float = 3.0  # skip strikes with bid/ask spread % above this (0 = ignore)
+    live_strategy: int = 1       # which strategy (1|2|3) to trade in live mode
 
     def validate(self) -> None:
         if self.timeframe not in TIMEFRAMES:
             raise ValueError(f"timeframe must be one of {TIMEFRAMES}")
         if self.mode not in ("paper", "live"):
             raise ValueError("mode must be 'paper' or 'live'")
-        if self.live_contract not in ("ATM", "ITM"):
-            raise ValueError("live_contract must be 'ATM' or 'ITM'")
+        if self.live_strategy not in (1, 2, 3):
+            raise ValueError("live_strategy must be 1, 2 or 3")
         if self.sma_period < 1 or self.ema_period < 1:
             raise ValueError("SMA/EMA periods must be >= 1")
         if self.lots < 1:
