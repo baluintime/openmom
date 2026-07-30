@@ -54,28 +54,42 @@ class EnvSettings:
 class TFConfig:
     """Independent settings for one timeframe engine.
 
-    Paper mode runs all three strategies (1, 2, 3) in parallel for comparison,
-    each trading the ATM option. Live mode trades exactly one strategy.
+    Paper mode runs BOTH strategies (1 Renko, 2 Fast Ichimoku) in parallel for
+    comparison, each trading the ATM option. Live mode trades one strategy.
     """
     timeframe: int
     enabled: bool = False
     mode: str = "paper"          # "paper" | "live"
-    sma_period: int = 20
-    ema_period: int = 9
     lots: int = 1
-    live_strategy: int = 1       # which strategy (1|2|3) to trade in live mode
+    live_strategy: int = 1       # 1 = Renko, 2 = Fast Ichimoku (live mode)
+    # Renko
+    renko_mode: str = "atr"      # "atr" | "fixed"
+    renko_points: float = 6.0    # fixed brick size (index points); ATR fallback
+    atr_period: int = 14
+    ema_filter_period: int = 20  # EMA-20 overlay filter
+    # Fast Ichimoku (accelerated 9-22-44-22)
+    tenkan: int = 9
+    kijun: int = 22
+    senkou_b: int = 44
+    displacement: int = 22
 
     def validate(self) -> None:
         if self.timeframe not in TIMEFRAMES:
             raise ValueError(f"timeframe must be one of {TIMEFRAMES}")
         if self.mode not in ("paper", "live"):
             raise ValueError("mode must be 'paper' or 'live'")
-        if self.live_strategy not in (1, 2, 3):
-            raise ValueError("live_strategy must be 1, 2 or 3")
-        if self.sma_period < 1 or self.ema_period < 1:
-            raise ValueError("SMA/EMA periods must be >= 1")
+        if self.live_strategy not in (1, 2):
+            raise ValueError("live_strategy must be 1 (Renko) or 2 (Ichimoku)")
+        if self.renko_mode not in ("atr", "fixed"):
+            raise ValueError("renko_mode must be 'atr' or 'fixed'")
         if self.lots < 1:
             raise ValueError("lots must be >= 1")
+        for k in ("atr_period", "ema_filter_period", "tenkan", "kijun",
+                  "senkou_b", "displacement"):
+            if int(getattr(self, k)) < 1:
+                raise ValueError(f"{k} must be >= 1")
+        if self.renko_points <= 0:
+            raise ValueError("renko_points must be > 0")
 
 
 @dataclass

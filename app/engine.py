@@ -18,9 +18,9 @@ from zoneinfo import ZoneInfo
 from .broker import FILLED, REJECTED, LiveBroker, PaperBroker
 from .config import (DATA_DIR, IST, SPOT_INSTRUMENT_KEY, TIMEFRAMES, AppConfig,
                      parse_hhmm)
-from .market import SpotFeed
+from .market import SpotFeed, ema_series
 from .options import OptionSelector
-from .strategy import STRATEGIES, decide
+from .strategy import STRATEGIES, brick_size, context, decide, ichimoku, renko_dirs
 from .upstox_client import UpstoxClient, UpstoxError
 
 TZ = ZoneInfo(IST)
@@ -50,7 +50,7 @@ class TFEngine:
 
     def active_strats(self) -> list[int]:
         c = self.cfg()
-        return [c.live_strategy] if c.mode == "live" else [1, 2, 3]
+        return [c.live_strategy] if c.mode == "live" else [1, 2]
 
     def _sync_slots(self):
         want = set(self.active_strats())
@@ -63,8 +63,6 @@ class TFEngine:
                 del self.slots[sid]
 
     async def tick(self, now: datetime, ltp_map: dict):
-        c = self.cfg()
-        self.feed.set_periods(c.sma_period, c.ema_period)
         new = await self.feed.refresh()
         if self.feed.note:
             self.log("data", self.feed.note)
@@ -79,11 +77,10 @@ class TFEngine:
                 if lp:
                     pos["ltp"] = lp
 
-        if not self.feed.candles or self.feed.sma[-1] is None or self.feed.ema[-1] is None:
+        if not self.feed.candles:
             return
-        closes = [x.close for x in self.feed.candles]
-        sma, ema = self.feed.sma, self.feed.ema
-        last = self.feed.candles[-1]
+        candles = self.feed.candles
+        last = candles[-1]
 
         square = (now.time() >= parse_hhmm(self.parent.cfg.square_off_at)
                   or not self.parent.market_hours(now))
@@ -92,12 +89,13 @@ class TFEngine:
                      and not square)
 
         for sid in list(self.slots):
-            await self._run_strategy(sid, now, closes, sma, ema, last,
-                                     new, ltp_map, can_enter, square)
+            await self._run_strategy(sid, now, candles, last, new, ltp_map,
+                                     can_enter, square)
 
-    async def _run_strategy(self, sid, now, closes, sma, ema, last, new,
-                            ltp_map, can_enter, square):
+    async def _run_strategy(self, sid, now, candles, last, new, ltp_map,
+                            can_enter, square):
         slot = self.slots[sid]
+        cfg = self.cfg()
 
         # 1) settle any in-flight exit / entry fills first
         await self._settle(sid, now, ltp_map)
@@ -116,20 +114,20 @@ class TFEngine:
             return
         slot["handled"] = key
 
-        desired = decide(sid, closes, sma, ema, slot["side"])
+        desired = decide(sid, candles, cfg, slot["side"])
         if desired == slot["side"]:
             return
 
-        state = (f"close {last.close:.2f} · SMA {sma[-1]:.2f} · EMA {ema[-1]:.2f}")
+        ctx = context(sid, candles, cfg)
         if pos and not pos.get("exiting"):
             pos["exiting"] = f"→{desired or 'flat'}"
             slot["pending_entry"] = desired if desired in ("long", "short") else None
             await self._place_exit(sid)
-            self.log("trade", f"[{STRATEGIES[sid]['name']}] EXIT ({last.ts:%H:%M} "
-                              f"{state}) → {desired or 'flat'}")
+            self.log("trade", f"[{STRATEGIES[sid]['name']}] EXIT ({last.ts:%H:%M} · "
+                              f"{ctx}) → {desired or 'flat'}")
         elif not pos and desired in ("long", "short"):
             if can_enter:
-                await self._enter(sid, now, desired, last, state)
+                await self._enter(sid, now, desired, last, ctx)
 
     async def _enter(self, sid, now, side, last, state):
         opt_side = "CE" if side == "long" else "PE"
@@ -170,9 +168,8 @@ class TFEngine:
                 side = slot["pending_entry"]
                 slot["pending_entry"] = None
                 last = self.feed.candles[-1]
-                state = (f"close {last.close:.2f} · SMA {self.feed.sma[-1]:.2f} · "
-                         f"EMA {self.feed.ema[-1]:.2f}")
-                await self._enter(sid, now, side, last, state)
+                ctx = context(sid, self.feed.candles, self.cfg())
+                await self._enter(sid, now, side, last, ctx)
             return
         lp = ltp_map.get(pos["option"]["instrument_key"])
         # fill the entry market order
@@ -240,7 +237,31 @@ class TFEngine:
                 "entry_time": pos["entry_ts"], "exiting": pos.get("exiting"),
                 "unreal_pts": round(upts, 2), "unreal_rs": round(upts * pos["qty"], 2)})
         return {"tf": self.tf, "running": self.running, "config": asdict(c),
-                "feed": self.feed.snapshot(), "positions": positions}
+                "feed": self._chart(c), "positions": positions}
+
+    def _chart(self, c, points: int = 90) -> dict:
+        """Close + EMA-20 (Renko overlay) + Tenkan/Kijun (Ichimoku) for the chart."""
+        cs = self.feed.candles
+        closes = [x.close for x in cs]
+        ema = ema_series(closes, c.ema_filter_period)
+        t, k, _sa, _sb = ichimoku(cs, c.tenkan, c.kijun, c.senkou_b) if cs else ([], [], [], [])
+        n = len(cs)
+        rng = range(max(0, n - points), n)
+        last = cs[-1] if cs else None
+        cur = lambda arr: (round(arr[-1], 2) if arr and arr[-1] is not None else None)
+        return {
+            "timeframe": self.tf,
+            "last_ts": last.ts.strftime("%H:%M") if last else None,
+            "last_close": round(last.close, 2) if last else None,
+            "ema": cur(ema), "tenkan": cur(t), "kijun": cur(k),
+            "brick": round(brick_size(cs, c), 2) if cs else None,
+            "series": [
+                {"t": cs[i].ts.strftime("%H:%M"), "c": round(cs[i].close, 2),
+                 "e": round(ema[i], 2) if ema[i] is not None else None,
+                 "tk": round(t[i], 2) if t[i] is not None else None,
+                 "kj": round(k[i], 2) if k[i] is not None else None}
+                for i in rng],
+        }
 
 
 class Engine:
@@ -341,7 +362,7 @@ class Engine:
 
     def comparison(self) -> dict:
         agg = {sid: {"trades": 0, "wins": 0, "net": 0.0, "points": 0.0}
-               for sid in (1, 2, 3)}
+               for sid in (1, 2)}
         for t in self.trades:
             sid = t.get("strategy")
             if sid in agg:

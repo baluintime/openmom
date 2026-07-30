@@ -17,7 +17,7 @@ env = EnvSettings()
 client = UpstoxClient(env.api_key, env.api_secret, env.redirect_uri)
 engine = Engine(client, load_config())
 
-app = FastAPI(title="NIFTY SMA+EMA Options Scalper (Upstox)")
+app = FastAPI(title="NIFTY Renko vs Ichimoku Options Scalper (Upstox)")
 
 
 @app.on_event("startup")
@@ -122,11 +122,15 @@ async def set_config(body: dict = Body(...)):
               "square_off_at", "candle_grace_sec"):
         if k in body:
             setattr(cfg, k, body[k])
+    _int_fields = {"lots", "live_strategy", "atr_period", "ema_filter_period",
+                   "tenkan", "kijun", "senkou_b", "displacement", "timeframe"}
     if "tf" in body and isinstance(body["tf"], dict):
         for tk, tv in body["tf"].items():
             if tk in cfg.tf and isinstance(tv, dict):
                 merged = dict(cfg.tf[tk])
-                merged.update({k: v for k, v in tv.items() if k in merged})
+                for k, v in tv.items():
+                    if k in merged:
+                        merged[k] = int(v) if (k in _int_fields and v is not None) else v
                 try:
                     TFConfig(**merged).validate()
                 except (ValueError, TypeError) as e:

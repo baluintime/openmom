@@ -3,20 +3,20 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>NIFTY SMA+EMA Scalper — Upstox</title>
+<title>NIFTY Renko vs Ichimoku Scalper — Upstox</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M1 12 L5 7 L8 9 L14 3' stroke='%232a78d6' stroke-width='2' fill='none'/%3E%3C/svg%3E">
 <style>
   :root{
     --page:#f9f9f7; --surface:#fcfcfb; --ink:#0b0b0b; --ink2:#52514e; --muted:#898781;
     --grid:#e1e0d9; --axis:#c3c2b7; --border:rgba(11,11,11,.10);
-    --close:#2a78d6; --sma:#eb6834; --ema:#1baf7a;
+    --close:#2a78d6; --sma:#eb6834; --ema:#1baf7a; --kijun:#4a3aa7;
     --good:#0ca30c; --goodtext:#006300; --crit:#d03b3b; --live:#d03b3b;
   }
   @media (prefers-color-scheme: dark){
     :root{
       --page:#0d0d0d; --surface:#1a1a19; --ink:#fff; --ink2:#c3c2b7; --muted:#898781;
       --grid:#2c2c2a; --axis:#383835; --border:rgba(255,255,255,.10);
-      --close:#3987e5; --sma:#d95926; --ema:#199e70; --goodtext:#0ca30c;
+      --close:#3987e5; --sma:#d95926; --ema:#199e70; --kijun:#9085e9; --goodtext:#0ca30c;
     }
   }
   *{box-sizing:border-box}
@@ -83,7 +83,7 @@
 </head>
 <body>
 <header>
-  <h1>NIFTY SMA + EMA Scalper</h1>
+  <h1>NIFTY Renko vs Ichimoku Scalper</h1>
   <span id="mktBadge" class="badge off">MARKET</span>
   <span class="tile" style="padding:4px 12px"><span class="note">Spot</span>
     <b id="spot" style="margin-left:6px">—</b></span>
@@ -111,13 +111,12 @@
         <span id="runBadge" class="badge off">STOPPED</span>
       </div>
       <div class="row">
-        <label class="opt"><input type="radio" name="mode" value="paper"> Paper (all 3)</label>
+        <label class="opt"><input type="radio" name="mode" value="paper"> Paper (both)</label>
         <label class="opt"><input type="radio" name="mode" value="live"> Live</label>
         <span class="note">Live strategy:</span>
         <select id="liveStrategy" style="padding:5px 8px;border:1px solid var(--border);
            border-radius:6px;background:var(--page);color:var(--ink)">
-          <option value="1">S1 · MA Zone</option><option value="2">S2 · MA Momentum</option>
-          <option value="3">S3 · Price Crossover</option></select>
+          <option value="1">Renko</option><option value="2">Fast Ichimoku</option></select>
       </div>
     </div>
     <div id="strategyLine" class="note" style="margin-top:8px"></div>
@@ -126,22 +125,23 @@
   <section class="tiles">
     <div class="tile"><div class="k">Close (this TF)</div><div class="v" id="tClose">—</div>
       <div class="s" id="tCandle"></div></div>
-    <div class="tile"><div class="k" id="tSmaK">SMA</div><div class="v" id="tSma">—</div></div>
-    <div class="tile"><div class="k" id="tEmaK">EMA</div><div class="v" id="tEma">—</div></div>
-    <div class="tile"><div class="k">Bias</div><div class="v" id="tBias">—</div>
-      <div class="s" id="tBiasS"></div></div>
+    <div class="tile"><div class="k">EMA-20 · Renko brick</div><div class="v" id="tEma">—</div>
+      <div class="s" id="tBrick"></div></div>
+    <div class="tile"><div class="k">Tenkan</div><div class="v" id="tTk">—</div></div>
+    <div class="tile"><div class="k">Kijun</div><div class="v" id="tKj">—</div></div>
   </section>
 
   <section class="card">
-    <h2 id="chartTitle">NIFTY 50 spot · close vs SMA &amp; EMA (engine's own candles)</h2>
+    <h2 id="chartTitle">NIFTY 50 spot · close, EMA-20, Tenkan &amp; Kijun (engine's own candles)</h2>
     <div id="chartwrap">
       <svg id="chart" width="100%" height="260" viewBox="0 0 1080 260" preserveAspectRatio="none"></svg>
       <div id="tip" class="tip"></div>
     </div>
     <div class="legend">
       <span><i style="background:var(--close)"></i>Close</span>
-      <span><i style="background:var(--sma)"></i>SMA</span>
-      <span><i style="background:var(--ema)"></i>EMA</span>
+      <span><i style="background:var(--sma)"></i>EMA-20</span>
+      <span><i style="background:var(--ema)"></i>Tenkan</span>
+      <span><i style="background:var(--kijun)"></i>Kijun</span>
     </div>
   </section>
 
@@ -163,9 +163,9 @@
   <!-- shared -->
   <section class="card">
     <h2>Strategy comparison (all paper trades, today · all timeframes)</h2>
-    <div class="cmp" id="cmp" style="grid-template-columns:repeat(3,1fr)"></div>
-    <p class="note" style="margin-bottom:0">All three strategies trade the ATM option on the same
-    SMA/EMA. Net is after ₹ charges per round trip. The leader (highest net) is highlighted.</p>
+    <div class="cmp" id="cmp" style="grid-template-columns:repeat(2,1fr)"></div>
+    <p class="note" style="margin-bottom:0">Both strategies trade the ATM option on the same candles,
+    so it's apples-to-apples. Net is after ₹ charges per round trip. The leader (highest net) is highlighted.</p>
   </section>
 
   <section class="card">
@@ -261,22 +261,16 @@ function render(){
   document.querySelectorAll('input[name=mode]').forEach(r=>r.checked=r.value===c.mode);
   $('liveStrategy').value=c.live_strategy;
   const sname=(state.strategies&&state.strategies[c.live_strategy])?state.strategies[c.live_strategy].name:('S'+c.live_strategy);
-  $('strategyLine').textContent=`${curTf}m · ${c.mode.toUpperCase()} · SMA ${c.sma_period} & EMA ${c.ema_period}`
-    +` · ${c.lots} lot(s) · long=CE / short=PE · `
-    +(c.mode==='paper'?'paper runs all 3 strategies (ATM) for comparison':`live trades ${sname}`);
+  $('strategyLine').textContent=`${curTf}m · ${c.mode.toUpperCase()} · `
+    +`Renko(${c.renko_mode==='atr'?'ATR'+c.atr_period:c.renko_points+'pt'}, EMA${c.ema_filter_period}) `
+    +`· Ichimoku(${c.tenkan}-${c.kijun}-${c.senkou_b}-${c.displacement}) · ${c.lots} lot(s) · `
+    +(c.mode==='paper'?'paper runs BOTH strategies (ATM) for comparison':`live trades ${sname}`);
   // tiles
   $('tClose').textContent=fmt(f.last_close);
   $('tCandle').textContent=f.last_ts?'candle '+f.last_ts:'';
-  $('tSmaK').textContent='SMA ('+c.sma_period+')'; $('tSma').textContent=fmt(f.sma);
-  $('tEmaK').textContent='EMA ('+c.ema_period+')'; $('tEma').textContent=fmt(f.ema);
-  let bias='—',bs='';
-  if(f.last_close!=null&&f.sma!=null&&f.ema!=null){
-    if(f.last_close>f.sma&&f.last_close>f.ema){bias='LONG zone';bs='close above both';}
-    else if(f.last_close<f.sma&&f.last_close<f.ema){bias='SHORT zone';bs='close below both';}
-    else{bias='NEUTRAL';bs='between SMA & EMA';}
-  }
-  $('tBias').textContent=bias; $('tBias').className='v '+(bias.startsWith('LONG')?'pos':bias.startsWith('SHORT')?'neg':'');
-  $('tBiasS').textContent=bs;
+  $('tEma').textContent=fmt(f.ema);
+  $('tBrick').textContent=f.brick!=null?('brick '+fmt(f.brick)+' pts'):'';
+  $('tTk').textContent=fmt(f.tenkan); $('tKj').textContent=fmt(f.kijun);
   renderPosition(e); renderCmp(s.comparison); renderTrades(s); renderLog();
   if(cfgBuiltFor!==engKey()) buildCfg(c);
   drawChart(f);
@@ -303,7 +297,7 @@ function renderCmp(c){
     <div class="note">${d.trades} trades · ${d.win_rate}% win · ${d.points>=0?'+':''}${fmt(d.points)} pts</div>
     <div class="note" style="margin-top:6px">${d.desc}</div></div>`;
   const st=c.strategies;
-  $('cmp').innerHTML=[1,2,3].map(sid=>box(st[sid],c.leader===sid)).join('');
+  $('cmp').innerHTML=[1,2].map(sid=>box(st[sid],c.leader===sid)).join('');
 }
 
 function renderTrades(s){
@@ -331,7 +325,7 @@ function drawChart(f){
   const svg=$('chart');
   if(!f.series||f.series.length<2){svg.innerHTML='<text x="20" y="40">Waiting for live candles…</text>';return;}
   const pts=f.series, W=1080,H=260,L=56,R=64,T=12,B=24;
-  const vals=[]; pts.forEach(p=>{vals.push(p.c);if(p.s!=null)vals.push(p.s);if(p.e!=null)vals.push(p.e);});
+  const vals=[]; pts.forEach(p=>{vals.push(p.c);['e','tk','kj'].forEach(k=>{if(p[k]!=null)vals.push(p[k]);});});
   let lo=Math.min(...vals),hi=Math.max(...vals);const pad=Math.max((hi-lo)*.08,2);lo-=pad;hi+=pad;
   const x=i=>L+i*(W-L-R)/(pts.length-1), y=v=>T+(hi-v)*(H-T-B)/(hi-lo);
   let out='';
@@ -340,10 +334,10 @@ function drawChart(f){
     out+=`<text x="${L-8}" y="${yy+4}" text-anchor="end">${v.toFixed(0)}</text>`;}
   const step=Math.max(1,Math.floor(pts.length/8));
   for(let i=0;i<pts.length;i+=step) out+=`<text x="${x(i)}" y="${H-6}" text-anchor="middle">${pts[i].t}</text>`;
-  const line=(get,color)=>{let d='',st=false;pts.forEach((p,i)=>{const v=get(p);if(v==null)return;
+  const line=(key,color)=>{let d='',st=false;pts.forEach((p,i)=>{const v=p[key];if(v==null)return;
     d+=(st?'L':'M')+x(i).toFixed(1)+' '+y(v).toFixed(1);st=true;});
     return `<path d="${d}" fill="none" stroke="${color}" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;};
-  out+=line(p=>p.s,'var(--sma)')+line(p=>p.e,'var(--ema)')+line(p=>p.c,'var(--close)');
+  out+=line('e','var(--sma)')+line('tk','var(--ema)')+line('kj','var(--kijun)')+line('c','var(--close)');
   const last=pts[pts.length-1];
   out+=`<text x="${W-R+6}" y="${y(last.c)+4}" style="fill:var(--close);font-weight:600">${last.c.toFixed(1)}</text>`;
   out+=`<line id="xhair" y1="${T}" y2="${H-B}" stroke="var(--axis)" stroke-width="1" visibility="hidden"/>`;
@@ -356,7 +350,8 @@ wrap.addEventListener('mousemove',ev=>{const svg=$('chart'),g=svg._geom;if(!g)re
   const p=g.pts[i],xh=svg.querySelector('#xhair');
   if(xh){xh.setAttribute('x1',g.x(i));xh.setAttribute('x2',g.x(i));xh.setAttribute('visibility','visible');}
   tip.style.display='block';tip.style.left=Math.min(ev.clientX-rect.left+14,rect.width-170)+'px';tip.style.top='14px';
-  tip.innerHTML=`<b>${p.t}</b><br>Close ${fmt(p.c)}<br>SMA ${p.s!=null?fmt(p.s):'—'}<br>EMA ${p.e!=null?fmt(p.e):'—'}`;});
+  tip.innerHTML=`<b>${p.t}</b><br>Close ${fmt(p.c)}<br>EMA-20 ${p.e!=null?fmt(p.e):'—'}`
+    +`<br>Tenkan ${p.tk!=null?fmt(p.tk):'—'}<br>Kijun ${p.kj!=null?fmt(p.kj):'—'}`;});
 wrap.addEventListener('mouseleave',()=>{tip.style.display='none';
   const xh=$('chart').querySelector('#xhair');if(xh)xh.setAttribute('visibility','hidden');});
 
@@ -380,20 +375,27 @@ async function saveTf(patch){
 }
 
 // ---- settings ----
-const CFG=[['sma_period','SMA period','number'],['ema_period','EMA period','number'],
-  ['lots','Lots','number']];
+const CFG=[['lots','Lots','number'],
+  ['renko_points','Renko brick pts (fixed)','number'],['atr_period','Renko ATR period','number'],
+  ['ema_filter_period','Renko EMA filter','number'],
+  ['tenkan','Ichimoku Tenkan','number'],['kijun','Ichimoku Kijun','number'],
+  ['senkou_b','Ichimoku Senkou B','number'],['displacement','Ichimoku Displacement','number']];
 let cfgBuiltFor=null;
 function buildCfg(c){
   cfgBuiltFor=engKey();
   $('cfgGrid').innerHTML=CFG.map(([k,l,t])=>`<label>${l}<input data-k="${k}" type="${t}" step="any" value="${c[k]}"></label>`).join('')
+    +`<label>Renko brick mode<select data-k="renko_mode">
+        <option value="atr" ${c.renko_mode==='atr'?'selected':''}>Dynamic ATR</option>
+        <option value="fixed" ${c.renko_mode==='fixed'?'selected':''}>Fixed points</option></select></label>`
     +`<label>Live strategy<select data-k="live_strategy">
-        <option value="1" ${c.live_strategy==1?'selected':''}>S1 · MA Zone</option>
-        <option value="2" ${c.live_strategy==2?'selected':''}>S2 · MA Momentum</option>
-        <option value="3" ${c.live_strategy==3?'selected':''}>S3 · Price Crossover</option></select></label>`;
+        <option value="1" ${c.live_strategy==1?'selected':''}>Renko</option>
+        <option value="2" ${c.live_strategy==2?'selected':''}>Fast Ichimoku</option></select></label>`;
 }
 $('btnSaveCfg').onclick=async()=>{const patch={};
   document.querySelectorAll('#cfgGrid input,#cfgGrid select').forEach(inp=>{
-    patch[inp.dataset.k]=inp.dataset.k==='live_strategy'?Number(inp.value)
+    const k=inp.dataset.k;
+    patch[k]=k==='renko_mode'?inp.value
+      :k==='live_strategy'?Number(inp.value)
       :inp.tagName==='SELECT'?inp.value:Number(inp.value);});
   try{await post('/api/config',{tf:{[curTf]:patch}});toast('Saved.');cfgBuiltFor=null;refresh();}catch(e){toast(e.message);}
 };

@@ -58,15 +58,15 @@ def ema_series(closes: list[float], period: int) -> list[float | None]:
 
 
 class SpotFeed:
-    """Builds tf-minute candles from live 1-minute data and computes SMA/EMA."""
+    """Builds tf-minute candles locally from live 1-minute data (Upstox's own
+    5m/15m aggregates finalize late). Strategies compute their own indicators
+    from `self.candles`."""
 
     def __init__(self, client: UpstoxClient, timeframe: int, grace_sec: int = 6):
         self.client = client
         self.tf = timeframe
         self.grace_sec = grace_sec
         self.candles: list[Candle] = []
-        self.sma: list[float | None] = []
-        self.ema: list[float | None] = []
         self.last_processed_ts: datetime | None = None
         self._seed: list[Candle] = []
         self._seed_day: str | None = None
@@ -132,9 +132,6 @@ class SpotFeed:
                     completed = completed[:-1]
 
         self.candles = self._seed + completed
-        closes = [c.close for c in self.candles]
-        self.sma = sma_series(closes, self._sma_period)
-        self.ema = ema_series(closes, self._ema_period)
 
         if self.last_processed_ts is None:
             new = completed[-1:]
@@ -143,42 +140,3 @@ class SpotFeed:
         if completed:
             self.last_processed_ts = completed[-1].ts
         return new
-
-    # periods are pushed in by the engine before each refresh
-    _sma_period = 20
-    _ema_period = 9
-
-    def set_periods(self, sma: int, ema: int) -> None:
-        self._sma_period, self._ema_period = sma, ema
-
-    def signal_state(self) -> dict | None:
-        """State of the latest completed candle: its close, SMA, EMA and the
-        above/below flags. None until enough candles exist."""
-        if not self.candles or self.sma[-1] is None or self.ema[-1] is None:
-            return None
-        c = self.candles[-1]
-        s, e = self.sma[-1], self.ema[-1]
-        return {"ts": c.ts, "close": c.close, "sma": s, "ema": e,
-                "above_both": c.close > s and c.close > e,
-                "below_both": c.close < s and c.close < e,
-                "above_either": c.close > s or c.close > e,
-                "below_either": c.close < s or c.close < e}
-
-    def snapshot(self, points: int = 90) -> dict:
-        cs = self.candles[-points:]
-        ss = self.sma[-points:]
-        es = self.ema[-points:]
-        last = self.candles[-1] if self.candles else None
-        return {
-            "timeframe": self.tf,
-            "last_ts": last.ts.strftime("%H:%M") if last else None,
-            "last_close": round(last.close, 2) if last else None,
-            "sma": round(self.sma[-1], 2) if self.sma and self.sma[-1] is not None else None,
-            "ema": round(self.ema[-1], 2) if self.ema and self.ema[-1] is not None else None,
-            "series": [
-                {"t": c.ts.strftime("%H:%M"), "c": round(c.close, 2),
-                 "s": round(s, 2) if s is not None else None,
-                 "e": round(e, 2) if e is not None else None}
-                for c, s, e in zip(cs, ss, es)
-            ],
-        }
