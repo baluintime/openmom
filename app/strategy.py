@@ -13,8 +13,8 @@ from __future__ import annotations
 from .market import ema_series
 
 STRATEGIES = {
-    1: {"name": "Renko", "desc": "2 consecutive bricks in trend + EMA-20 overlay; "
-                                 "exit on a reversal brick."},
+    1: {"name": "Renko", "desc": "Tick-driven bricks (2-box reversal): 2 bricks in "
+                                 "trend + EMA-20; exit on reversal brick / wick SL / target."},
     2: {"name": "Fast Ichimoku", "desc": "Price breaks the Kumo with Tenkan/Kijun "
                                          "aligned; exit on close across Tenkan."},
 }

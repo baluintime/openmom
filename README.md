@@ -21,15 +21,23 @@ candles only). Long buys a CE, short buys a PE — always the **ATM** option. In
 dashboard scoreboard compares them apples-to-apples on identical candles.
 **Live mode** trades one (`live_strategy`).
 
-**Strategy 1 · Renko** (primary — pure momentum)
-- Bricks are built from the spot close with a size set by **ATR(14)** (dynamic)
-  or a **fixed point** value (5–10 for NIFTY), configurable.
+**Strategy 1 · Renko** (primary — pure momentum, **tick-driven**)
+- Bricks are built **tick-by-tick from the live index price** (the NIFTY spot
+  LTP, sampled every second — the index itself only re-computes ~once a second,
+  so this is effectively tick-level for the underlying), using classic **2-box
+  reversal** and tracking each brick's **wick**. Brick size = **ATR(14)**
+  (dynamic) or a **fixed point** value (5–10 for NIFTY), configurable.
 - **2-brick rule**: enter only after **two consecutive bricks** in the new
-  direction — long (CE) when they're up **and** close is above the EMA-20
-  overlay; short (PE) when down and below EMA-20.
-- Exit on the first **reversal brick** (the trailing stop the spec emphasises).
-- Simplification vs a classic Renko: 1-box reversal construction on closes
-  (deterministic, no repaint) rather than tick-based OHLC bricks with wicks.
+  direction — long (CE) when up **and** price is above the EMA-20 overlay;
+  short (PE) when down and below EMA-20.
+- **Exits (all evaluated per tick)**: a **reversal brick**, the **stop-loss at
+  the wick/base of the run's first brick**, or the **take-profit at 1.5–2.0
+  bricks** (`renko_target_bricks`) from entry.
+- Brick completion is evaluated the instant price crosses a threshold — not on
+  candle close — matching the spec's "triggers immediately upon brick
+  threshold completion". The dashboard shows the live brick strip, size, and
+  the active SL/target. (Sub-second true-tick precision would need the Upstox
+  websocket feed; 1-second LTP sampling of the index is equivalent in practice.)
 
 **Strategy 2 · Fast Ichimoku** (accelerated 9-22-44-22)
 - Tenkan 9, Kijun 22, Senkou-B 44, displacement 22 — all configurable.

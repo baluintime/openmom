@@ -67,6 +67,7 @@ class TFConfig:
     renko_points: float = 6.0    # fixed brick size (index points); ATR fallback
     atr_period: int = 14
     ema_filter_period: int = 20  # EMA-20 overlay filter
+    renko_target_bricks: float = 1.75  # take-profit distance in bricks (1.5–2.0)
     # Fast Ichimoku (accelerated 9-22-44-22)
     tenkan: int = 9
     kijun: int = 22
@@ -90,6 +91,8 @@ class TFConfig:
                 raise ValueError(f"{k} must be >= 1")
         if self.renko_points <= 0:
             raise ValueError("renko_points must be > 0")
+        if self.renko_target_bricks <= 0:
+            raise ValueError("renko_target_bricks must be > 0")
 
 
 @dataclass

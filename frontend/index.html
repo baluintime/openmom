@@ -143,6 +143,10 @@
       <span><i style="background:var(--ema)"></i>Tenkan</span>
       <span><i style="background:var(--kijun)"></i>Kijun</span>
     </div>
+    <div style="margin-top:10px">
+      <div class="note">Renko bricks (tick-driven, size <span id="brickSize">—</span> pts) — newest at right:</div>
+      <div id="bricks" style="display:flex;gap:2px;flex-wrap:wrap;margin-top:5px"></div>
+    </div>
   </section>
 
   <section class="card">
@@ -272,6 +276,7 @@ function render(){
   $('tBrick').textContent=f.brick!=null?('brick '+fmt(f.brick)+' pts'):'';
   $('tTk').textContent=fmt(f.tenkan); $('tKj').textContent=fmt(f.kijun);
   renderPosition(e); renderCmp(s.comparison); renderTrades(s); renderLog();
+  renderBricks(e);
   if(cfgBuiltFor!==engKey()) buildCfg(c);
   drawChart(f);
 }
@@ -280,13 +285,23 @@ function renderPosition(e){
   const el=$('position');
   if(!e.positions||!e.positions.length){el.innerHTML='<span class="note">No open position.</span>';return;}
   let h='<div style="overflow-x:auto"><table><thead><tr><th>Strategy</th><th>Side</th><th>Contract</th>'
-    +'<th>Qty</th><th>Entry</th><th>LTP</th><th>Unrealized</th><th>Since</th></tr></thead><tbody>';
+    +'<th>Qty</th><th>Entry</th><th>LTP</th><th>SL / Target (idx)</th><th>Unrealized</th><th>Since</th></tr></thead><tbody>';
   e.positions.forEach(p=>{const cls=p.unreal_rs>=0?'pos':'neg';
+    const slt=(p.renko_sl!=null)?`${fmt(p.renko_sl)} / ${fmt(p.renko_target)}`:'—';
     h+=`<tr><td><b>${p.strategy_name}</b></td><td>${p.side}${p.exiting?` · EXIT(${p.exiting})`:''}</td>
       <td>${p.symbol}</td><td>${p.qty}</td><td>${p.entry!=null?fmt(p.entry):'…'}</td><td>${fmt(p.ltp)}</td>
+      <td>${slt}</td>
       <td class="${cls}"><b>${p.unreal_pts>=0?'+':''}${fmt(p.unreal_pts)} (${rs(p.unreal_rs)})</b></td>
       <td>${p.entry_time}</td></tr>`;});
   h+='</tbody></table></div>'; el.innerHTML=h;
+}
+
+function renderBricks(e){
+  $('brickSize').textContent=e.brick_size!=null?fmt(e.brick_size,0):'—';
+  const bx=e.bricks||[];
+  $('bricks').innerHTML=bx.map(b=>`<span title="close ${fmt(b.c)}" style="width:14px;height:20px;border-radius:2px;
+    background:${b.d>0?'var(--good)':'var(--crit)'}"></span>`).join('')
+    ||'<span class="note">no bricks yet</span>';
 }
 
 function renderCmp(c){
@@ -377,7 +392,7 @@ async function saveTf(patch){
 // ---- settings ----
 const CFG=[['lots','Lots','number'],
   ['renko_points','Renko brick pts (fixed)','number'],['atr_period','Renko ATR period','number'],
-  ['ema_filter_period','Renko EMA filter','number'],
+  ['ema_filter_period','Renko EMA filter','number'],['renko_target_bricks','Renko target (bricks)','number'],
   ['tenkan','Ichimoku Tenkan','number'],['kijun','Ichimoku Kijun','number'],
   ['senkou_b','Ichimoku Senkou B','number'],['displacement','Ichimoku Displacement','number']];
 let cfgBuiltFor=null;
