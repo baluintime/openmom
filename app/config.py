@@ -132,7 +132,17 @@ def load_config() -> AppConfig:
                     setattr(cfg, k, v)
         except Exception:
             pass
-    cfg.validate()
+    # self-heal: a stale/invalid saved value (e.g. an old strategy id) must not
+    # crash startup — reset only the offending timeframe to its defaults
+    for t in TIMEFRAMES:
+        try:
+            cfg.tfcfg(t).validate()
+        except (ValueError, TypeError):
+            cfg.tf[str(t)] = asdict(TFConfig(timeframe=t))
+    try:
+        cfg.validate()
+    except (ValueError, TypeError):
+        cfg = AppConfig()
     return cfg
 
 
