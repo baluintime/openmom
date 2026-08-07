@@ -79,12 +79,17 @@ class EODEngine:
             pass
 
     def _load_positions(self) -> list[dict]:
-        if POSITIONS_FILE.exists():
-            try:
-                return json.loads(POSITIONS_FILE.read_text())
-            except Exception:
-                return []
-        return []
+        """Load carried positions. Tolerates a stale/foreign file (e.g. an old
+        version's dict) by keeping only well-formed position records."""
+        if not POSITIONS_FILE.exists():
+            return []
+        try:
+            data = json.loads(POSITIONS_FILE.read_text())
+        except Exception:
+            return []
+        if not isinstance(data, list):
+            return []
+        return [p for p in data if isinstance(p, dict) and "status" in p and "option_key" in p]
 
     def _save_positions(self):
         try:
@@ -99,7 +104,7 @@ class EODEngine:
             for line in TRADES_FILE.read_text().splitlines():
                 try:
                     t = json.loads(line)
-                    if t.get("exit_day") == today:
+                    if isinstance(t, dict) and t.get("exit_day") == today:
                         out.append(t)
                 except Exception:
                     continue
@@ -328,9 +333,10 @@ class EODEngine:
     # ---------- status ----------
     def status(self) -> dict:
         now = datetime.now(TZ)
-        opens = [p for p in self.positions if p["status"] == "open"]
+        opens = [p for p in self.positions if p.get("status") == "open"]
         for p in opens:
-            up = (p["sell_price"] - (p.get("ltp") or p["sell_price"])) * p["qty"]
+            sell = p.get("sell_price") or 0.0
+            up = (sell - (p.get("ltp") or sell)) * (p.get("qty") or 0)
             p["unreal_rs"] = round(up, 2)
         return {
             "now_ist": now.strftime("%Y-%m-%d %H:%M:%S"),
