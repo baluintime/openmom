@@ -1,272 +1,116 @@
-"""Per-timeframe engines (1m, 5m, 15m) on the NIFTY spot chart.
+"""NSE EOD Momentum engine.
 
-No strategy is currently wired in (see app/strategy.py) — the engines refresh
-the live feed, manage any open positions, and serve status/reports, but open
-no new trades. The position/broker plumbing (_enter, _settle, _finalize) is
-retained so a new strategy can trade immediately once its decision logic is
-added to the tick loop.
+Daily pipeline (IST): scan all F&O stocks at 3:15, re-scan the shortlist at
+3:24:50, then at 3:25 SELL an OTM option on each of the top-N stocks with a
++TP% / -SL% exit. Positions are carried overnight and closed only when the exit
+triggers (or on manual exit / expiry).
+
+Paper mode simulates fills at the real option LTP and monitors TP/SL locally.
+Live mode places real SELL orders (product D, carry-forward) and an exchange
+GTT for the exit.
 """
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from collections import deque
 from dataclasses import asdict
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .broker import FILLED, REJECTED, LiveBroker, PaperBroker
-from .config import (DATA_DIR, IST, SPOT_INSTRUMENT_KEY, TIMEFRAMES, AppConfig,
-                     parse_hhmm)
-from .market import SpotFeed
-from .options import OptionSelector
-from .strategy import STRATEGIES, name as strat_name
+from .config import (DATA_DIR, IST, POSITIONS_FILE, EODConfig, parse_hms)
+from .options import select_otm
+from .universe import get_universe, screen
 from .upstox_client import UpstoxClient, UpstoxError
 
 TZ = ZoneInfo(IST)
 TRADES_FILE = DATA_DIR / "trades.jsonl"
+_seq = itertools.count(1)
 
 
-class TFEngine:
-    """One timeframe: a feed plus (currently) no active strategy."""
-
-    def __init__(self, parent: "Engine", timeframe: int):
-        self.parent = parent
-        self.tf = timeframe
-        self.feed = SpotFeed(parent.client, timeframe, parent.cfg.candle_grace_sec)
-        self.running = False
-        # slot per active strategy id: {"side","position","handled","pending_entry"}
-        self.slots: dict[int, dict] = {}
-
-    def cfg(self):
-        return self.parent.cfg.tfcfg(self.tf)
-
-    def broker(self):
-        return (LiveBroker(self.parent.client) if self.cfg().mode == "live"
-                else self.parent.paper_broker)
-
-    def log(self, kind, msg):
-        self.parent.log(kind, msg, tf=self.tf)
-
-    def active_strats(self) -> list[int]:
-        # No strategy configured. A future strategy returns its id(s) here.
-        return list(STRATEGIES)
-
-    def _sync_slots(self):
-        want = set(self.active_strats())
-        for sid in want:
-            self.slots.setdefault(sid, {"side": None, "position": None,
-                                        "handled": None, "pending_entry": None})
-        for sid in list(self.slots):
-            if sid not in want and not self.slots[sid]["position"]:
-                del self.slots[sid]
-
-    async def tick(self, now: datetime, ltp_map: dict):
-        await self.feed.refresh()
-        if self.feed.note:
-            self.log("data", self.feed.note)
-            self.feed.note = None
-        self._sync_slots()
-
-        # keep any open positions' LTPs fresh and settle/flatten them
-        for sid in list(self.slots):
-            slot = self.slots[sid]
-            pos = slot["position"]
-            if pos:
-                lp = ltp_map.get(pos["option"]["instrument_key"])
-                if lp:
-                    pos["ltp"] = lp
-            await self._settle(sid, now, ltp_map)
-            pos = slot["position"]
-            square = (now.time() >= parse_hhmm(self.parent.cfg.square_off_at)
-                      or not self.parent.market_hours(now))
-            if pos and square and not pos.get("exiting"):
-                pos["exiting"] = "squareoff"
-                slot["pending_entry"] = None
-                await self._place_exit(sid)
-                self.log("trade", f"[{strat_name(sid)}] EXIT (squareoff)")
-
-        # --- strategy decisions would run here (none configured) ---
-
-    # ---- position/broker plumbing (reusable by a future strategy) ----
-    async def _enter(self, sid, now, side, last, note, extra=None):
-        opt_side = "CE" if side == "long" else "PE"
-        try:
-            ct = await self.parent.selector.select(opt_side)
-        except UpstoxError as e:
-            self.log("error", f"[{strat_name(sid)}] contract selection failed: {e}")
-            return
-        c = self.cfg()
-        qty = c.lots * ct.lot_size
-        order = await self.broker().place(instrument_key=ct.instrument_key,
-                                          side="BUY", order_type="MARKET", qty=qty)
-        idx = self.parent.spot_ltp
-        position = {
-            "option": asdict(ct), "qty": qty, "order": order,
-            "entry_price": None, "ltp": ct.ltp, "entry_ts": now.strftime("%H:%M:%S"),
-            "signal_candle": last.ts.strftime("%H:%M"), "exiting": None,
-            "exit_order": None, "entry_index": idx}
-        if extra:
-            position.update(extra)
-        self.slots[sid].update({"side": side, "position": position})
-        self.log("trade", f"[{strat_name(sid)}] {side.upper()} entry [{c.mode}] "
-                          + (f"— index {idx:.2f} · " if idx else "— ")
-                          + f"{note} — buy {ct.trading_symbol}")
-
-    async def _place_exit(self, sid):
-        pos = self.slots[sid]["position"]
-        if pos and pos["exit_order"] is None:
-            pos["exit_order"] = await self.broker().place(
-                instrument_key=pos["option"]["instrument_key"], side="SELL",
-                order_type="MARKET", qty=pos["qty"])
-
-    async def _settle(self, sid, now, ltp_map):
-        slot = self.slots[sid]
-        pos = slot["position"]
-        if not pos:
-            return
-        lp = ltp_map.get(pos["option"]["instrument_key"])
-        if pos["entry_price"] is None:
-            o = await self.broker().poll(pos["order"], lp)
-            if o.status == FILLED:
-                pos["entry_price"] = o.avg_price
-            elif o.status == REJECTED:
-                pos["entry_price"] = 0.0
-        if pos.get("exiting") and pos["exit_order"] is not None and pos["entry_price"] is not None:
-            o = await self.broker().poll(pos["exit_order"], lp)
-            if o.status == FILLED:
-                self._finalize(sid, o.avg_price, now)
-
-    def _finalize(self, sid, exit_price, now):
-        slot = self.slots[sid]
-        pos = slot["position"]
-        slot["position"] = None
-        slot["side"] = None
-        c = self.cfg()
-        entry = pos.get("entry_price") or 0.0
-        pts = exit_price - entry
-        gross = pts * pos["qty"]
-        charges = self.parent.cfg.round_trip_charges
-        entry_idx = pos.get("entry_index")
-        exit_idx = self.parent.spot_ltp
-        trade = {
-            "day": now.strftime("%Y-%m-%d"), "tf": f"{self.tf}m", "mode": c.mode,
-            "strategy": sid, "strategy_name": strat_name(sid),
-            "side": "long" if pos["option"]["side"] == "CE" else "short",
-            "symbol": pos["option"]["trading_symbol"], "strike": pos["option"]["strike"],
-            "qty": pos["qty"], "entry_time": pos["entry_ts"],
-            "exit_time": now.strftime("%H:%M:%S"),
-            "entry": round(entry, 2), "exit": round(exit_price, 2),
-            "entry_index": round(entry_idx, 2) if entry_idx else None,
-            "exit_index": round(exit_idx, 2) if exit_idx else None,
-            "index_points": (round(exit_idx - entry_idx, 2)
-                             if (entry_idx and exit_idx) else None),
-            "points": round(pts, 2), "gross_rs": round(gross, 2),
-            "charges_rs": round(charges, 2), "net_rs": round(gross - charges, 2),
-            "reason": pos.get("exiting"),
-        }
-        self.parent.record_trade(trade)
-        self.log("trade", f"[{strat_name(sid)}] EXITED {trade['symbol']} "
-                          f"@ ₹{exit_price:.2f}"
-                          + (f" · index {exit_idx:.2f}" if exit_idx else "")
-                          + f" — {pts:+.2f} pts, net ₹{trade['net_rs']:+,.2f}")
-
-    def status(self):
-        c = self.cfg()
-        positions = []
-        for sid in sorted(self.slots):
-            pos = self.slots[sid]["position"]
-            if not pos:
-                continue
-            entry = pos.get("entry_price")
-            ltp = pos.get("ltp") or 0
-            upts = (ltp - entry) if entry else 0
-            positions.append({
-                "strategy": sid, "strategy_name": strat_name(sid),
-                "side": self.slots[sid]["side"], "symbol": pos["option"]["trading_symbol"],
-                "strike": pos["option"]["strike"], "qty": pos["qty"],
-                "entry": round(entry, 2) if entry else None, "ltp": round(ltp, 2),
-                "entry_time": pos["entry_ts"], "exiting": pos.get("exiting"),
-                "unreal_pts": round(upts, 2), "unreal_rs": round(upts * pos["qty"], 2)})
-        return {"tf": self.tf, "running": self.running, "config": asdict(c),
-                "feed": self._chart(), "positions": positions}
-
-    def _chart(self, points: int = 90) -> dict:
-        cs = self.feed.candles[-points:]
-        last = self.feed.candles[-1] if self.feed.candles else None
-        return {
-            "timeframe": self.tf,
-            "last_ts": last.ts.strftime("%H:%M") if last else None,
-            "last_close": round(last.close, 2) if last else None,
-            "series": [{"t": c.ts.strftime("%H:%M"), "c": round(c.close, 2)} for c in cs],
-        }
-
-
-class Engine:
-    def __init__(self, client: UpstoxClient, cfg: AppConfig):
+class EODEngine:
+    def __init__(self, client: UpstoxClient, cfg: EODConfig):
         self.client = client
         self.cfg = cfg
-        self.selector = OptionSelector(client)
-        self.paper_broker = PaperBroker()
-        self.engines = {t: TFEngine(self, t) for t in TIMEFRAMES}
-        self.spot_ltp = None
-        self.events: deque[dict] = deque(maxlen=300)
+        self.running = False
+        self.events: deque[dict] = deque(maxlen=400)
+        self.positions: list[dict] = self._load_positions()
         self.trades: list[dict] = self._load_today_trades()
+        self.scan_result: list[dict] = []       # shortlist from the 3:15 scan
+        self.candidates: list[dict] = []         # definitive top-N from 3:24:50
+        self.universe_count = 0
+        self.last_scan_at: str | None = None
+        self.phase = {"scan": None, "refresh": None, "dispatch": None}  # date guards
         self._last_error = ""
-        self._task = None
+        self._task: asyncio.Task | None = None
 
-    def start(self, tf):
+    # ---------- lifecycle ----------
+    def start(self):
         if not self.client.access_token:
             raise UpstoxError("Connect to Upstox before starting")
-        self.engines[tf].running = True
-        self.log("engine", f"Engine started ({self.cfg.tfcfg(tf).mode}) — "
-                           "no strategy configured", tf=tf)
+        self.running = True
+        self.log("engine", f"Strategy armed ({self.cfg.mode}) — scan {self.cfg.scan_time}, "
+                           f"dispatch {self.cfg.dispatch_time}")
 
-    def stop(self, tf):
-        self.engines[tf].running = False
-        self.log("engine", "Engine stopped", tf=tf)
+    def stop(self):
+        self.running = False
+        self.log("engine", "Strategy disarmed (open positions still tracked)")
 
     def ensure_loop(self):
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
 
     @staticmethod
-    def market_hours(now):
+    def market_hours(now: datetime) -> bool:
         from datetime import time as _t
         return now.weekday() < 5 and _t(9, 15) <= now.time() < _t(15, 30)
 
-    def log(self, kind, msg, tf=None):
+    # ---------- logging / persistence ----------
+    def log(self, kind: str, msg: str):
         now = datetime.now(TZ)
-        tag = f"{tf}m" if tf else None
-        self.events.appendleft({"ts": now.strftime("%H:%M:%S"), "kind": kind,
-                                "msg": msg, "tf": tag})
+        self.events.appendleft({"ts": now.strftime("%H:%M:%S"), "kind": kind, "msg": msg})
         try:
             with (DATA_DIR / f"events-{now:%Y-%m-%d}.log").open("a", encoding="utf-8") as f:
-                f.write(f"{now:%H:%M:%S} [{tag or '--'}] [{kind}] {msg}\n")
+                f.write(f"{now:%H:%M:%S} [{kind}] {msg}\n")
             with (DATA_DIR / f"events-{now:%Y-%m-%d}.jsonl").open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"ts": now.isoformat(), "tf": tag,
-                                    "kind": kind, "msg": msg}, ensure_ascii=False) + "\n")
+                f.write(json.dumps({"ts": now.isoformat(), "kind": kind, "msg": msg}) + "\n")
         except OSError:
             pass
 
-    def _load_today_trades(self):
+    def _load_positions(self) -> list[dict]:
+        if POSITIONS_FILE.exists():
+            try:
+                return json.loads(POSITIONS_FILE.read_text())
+            except Exception:
+                return []
+        return []
+
+    def _save_positions(self):
+        try:
+            POSITIONS_FILE.write_text(json.dumps(self.positions, indent=0))
+        except OSError:
+            pass
+
+    def _load_today_trades(self) -> list[dict]:
         today = datetime.now(TZ).strftime("%Y-%m-%d")
         out = []
         if TRADES_FILE.exists():
             for line in TRADES_FILE.read_text().splitlines():
                 try:
                     t = json.loads(line)
-                    if t.get("day") == today:
+                    if t.get("exit_day") == today:
                         out.append(t)
                 except Exception:
                     continue
         return out
 
-    def record_trade(self, trade):
+    def _record_trade(self, trade: dict):
         self.trades.append(trade)
         with TRADES_FILE.open("a") as f:
             f.write(json.dumps(trade) + "\n")
 
+    # ---------- main loop ----------
     async def _run(self):
         while True:
             try:
@@ -276,7 +120,7 @@ class Engine:
             except Exception as e:
                 self._note_error(f"{type(e).__name__}: {e}")
             in_mkt = self.market_hours(datetime.now(TZ))
-            await asyncio.sleep(2 if (in_mkt and self.client.access_token) else 15)
+            await asyncio.sleep(3 if (in_mkt and self.client.access_token) else 20)
 
     def _note_error(self, msg):
         if msg != self._last_error:
@@ -287,27 +131,215 @@ class Engine:
         now = datetime.now(TZ)
         if not self.client.access_token:
             return
-        keys = [SPOT_INSTRUMENT_KEY]
-        for e in self.engines.values():
-            for slot in e.slots.values():
-                if slot["position"]:
-                    k = slot["position"]["option"]["instrument_key"]
-                    if k not in keys:
-                        keys.append(k)
-        ltp_map = await self.client.ltp(keys)
-        self.spot_ltp = ltp_map.get(SPOT_INSTRUMENT_KEY, self.spot_ltp)
-        for e in self.engines.values():
-            await e.tick(now, ltp_map)
+        await self._schedule(now)
+        await self._monitor(now)
 
-    def status(self):
+    async def _schedule(self, now: datetime):
+        if not (self.running and self.market_hours(now)):
+            return
+        day = now.strftime("%Y-%m-%d")
+        t = now.time()
+        if self.phase["scan"] != day and t >= parse_hms(self.cfg.scan_time):
+            self.phase["scan"] = day
+            await self._scan()
+        if (self.phase["refresh"] != day and self.scan_result
+                and t >= parse_hms(self.cfg.refresh_time)):
+            self.phase["refresh"] = day
+            await self._refresh()
+        if (self.phase["dispatch"] != day and self.candidates
+                and t >= parse_hms(self.cfg.dispatch_time)):
+            self.phase["dispatch"] = day
+            await self._dispatch(now)
+
+    # ---------- pipeline ----------
+    async def scan_now(self) -> list[dict]:
+        """Manual scan+refresh (does not dispatch) — for inspection."""
+        await self._scan()
+        await self._refresh()
+        return self.candidates
+
+    async def _scan(self):
+        universe = await get_universe(self.client)
+        self.universe_count = len(universe)
+        if self.cfg.universe_limit > 0:
+            universe = universe[:self.cfg.universe_limit]
+        quotes = await self.client.full_quote([s.equity_key for s in universe])
+        ranked = screen(universe, quotes)
+        self.scan_result = ranked[:self.cfg.shortlist_size]
+        self.last_scan_at = datetime.now(TZ).strftime("%H:%M:%S")
+        self.log("scan", f"Scanned {len(universe)} F&O stocks — shortlisted "
+                         f"{len(self.scan_result)} (top: "
+                         + ", ".join(f"{r['symbol']} {r['strength']:.2f}%"
+                                     for r in self.scan_result[:3]) + ")")
+
+    async def _refresh(self):
+        # rebuild Stock records from the shortlist and re-screen on fresh quotes
+        from .universe import Stock
+        shortlist = [Stock(symbol=r["symbol"], equity_key=r["equity_key"],
+                           lot_size=r["lot_size"], expiry=r["expiry"])
+                     for r in self.scan_result]
+        quotes = await self.client.full_quote([s.equity_key for s in shortlist])
+        ranked = screen(shortlist, quotes)
+        self.candidates = ranked[:self.cfg.top_n]
+        self.log("refresh", "Re-scan complete — definitive picks: "
+                 + ", ".join(f"{c['symbol']} ({c['bias']}, sell {c['side']}, "
+                             f"{c['strength']:.2f}%)" for c in self.candidates))
+
+    async def _dispatch(self, now: datetime):
+        held = {p["symbol"] for p in self.positions if p["status"] == "open"}
+        for c in self.candidates[:self.cfg.top_n]:
+            if c["symbol"] in held:
+                self.log("dispatch", f"{c['symbol']}: already holding a position — skipped")
+                continue
+            try:
+                ct = await select_otm(self.client, self.cfg, equity_key=c["equity_key"],
+                                      expiry=c["expiry"], side=c["side"],
+                                      spot=c["spot"], lot_size=c["lot_size"])
+            except UpstoxError as e:
+                self.log("error", f"{c['symbol']}: option selection failed — {e}")
+                continue
+            await self._sell(now, c, ct)
+
+    async def _sell(self, now: datetime, cand: dict, ct):
+        qty = self.cfg.lots * ct.lot_size
+        sell_price = ct.ltp
+        gtt_id = None
+        if self.cfg.mode == "live":
+            try:
+                await self.client.place_order(
+                    instrument_token=ct.instrument_key, quantity=qty,
+                    transaction_type="SELL", order_type="MARKET",
+                    product="D", tag="eod-momentum")
+            except UpstoxError as e:
+                self.log("error", f"{cand['symbol']}: live SELL failed — {e}")
+                return
+        target = round(sell_price * (1 - self.cfg.tp_pct / 100), 2)
+        stop = round(sell_price * (1 + self.cfg.sl_pct / 100), 2)
+        pos = {
+            "id": f"P{next(_seq)}", "symbol": cand["symbol"], "bias": cand["bias"],
+            "side": ct.side, "option_key": ct.instrument_key,
+            "option_symbol": ct.trading_symbol, "strike": ct.strike, "expiry": ct.expiry,
+            "lot_size": ct.lot_size, "qty": qty, "mode": self.cfg.mode,
+            "sell_price": round(sell_price, 2), "target": target, "stop": stop,
+            "spot_at_entry": cand["spot"], "strength_at_entry": cand["strength"],
+            "entry_time": now.strftime("%H:%M:%S"), "entry_day": now.strftime("%Y-%m-%d"),
+            "ltp": round(sell_price, 2), "status": "open", "gtt_id": gtt_id,
+            "oi": ct.oi, "delta": ct.delta, "spread_pct": ct.spread_pct,
+        }
+        if self.cfg.mode == "live":
+            try:
+                pos["gtt_id"] = await self.client.place_gtt(
+                    instrument_token=ct.instrument_key, quantity=qty,
+                    transaction_type="BUY", target_price=target, stop_price=stop,
+                    product="D")
+            except UpstoxError as e:
+                self.log("error", f"{cand['symbol']}: GTT attach failed — {e} "
+                                  "(position open WITHOUT exchange exit; will monitor locally)")
+        self.positions.append(pos)
+        self._save_positions()
+        self.log("trade", f"SOLD {ct.trading_symbol} × {qty} @ ₹{sell_price:.2f} "
+                          f"[{self.cfg.mode}] — {cand['symbol']} {cand['bias']} · "
+                          f"target ₹{target:.2f} / stop ₹{stop:.2f}")
+
+    async def _monitor(self, now: datetime):
+        opens = [p for p in self.positions if p["status"] == "open"]
+        if not opens:
+            return
+        today = now.strftime("%Y-%m-%d")
+        # expired OTM options that were carried: seller keeps the full premium
+        for p in list(opens):
+            if p["expiry"] < today:
+                self._close(p, exit_price=0.0, reason="expired", now=now)
+        opens = [p for p in self.positions if p["status"] == "open"]
+        if not opens:
+            return
+        keys = list({p["option_key"] for p in opens})
+        try:
+            ltp_map = await self.client.ltp(keys)
+        except UpstoxError:
+            return
+        for p in opens:
+            lp = ltp_map.get(p["option_key"])
+            if lp is None:
+                continue
+            p["ltp"] = round(lp, 2)
+            if not self.market_hours(now):
+                continue   # exits only trigger during market hours
+            # short option: profit when price falls to target, loss when it rises to stop
+            if lp <= p["target"]:
+                self._exit_now(p, lp, "target", now)
+            elif lp >= p["stop"]:
+                self._exit_now(p, lp, "stoploss", now)
+        self._save_positions()
+
+    def _exit_now(self, p: dict, price: float, reason: str, now: datetime):
+        # live GTT flattens on the exchange; paper simulates the buy-back fill
+        self._close(p, exit_price=price, reason=reason, now=now)
+
+    def _close(self, p: dict, exit_price: float, reason: str, now: datetime):
+        p["status"] = "closed"
+        p["exit_price"] = round(exit_price, 2)
+        p["exit_reason"] = reason
+        p["exit_time"] = now.strftime("%H:%M:%S")
+        pnl = (p["sell_price"] - exit_price) * p["qty"]      # short: credit - buyback
+        charges = self.cfg.charges_per_trade
+        trade = {
+            "entry_day": p["entry_day"], "exit_day": now.strftime("%Y-%m-%d"),
+            "symbol": p["symbol"], "bias": p["bias"], "side": p["side"],
+            "option_symbol": p["option_symbol"], "strike": p["strike"],
+            "expiry": p["expiry"], "qty": p["qty"], "mode": p["mode"],
+            "sell_price": p["sell_price"], "exit_price": round(exit_price, 2),
+            "spot_at_entry": p.get("spot_at_entry"),
+            "entry_time": p["entry_time"], "exit_time": p["exit_time"],
+            "reason": reason, "points": round(p["sell_price"] - exit_price, 2),
+            "gross_rs": round(pnl, 2), "charges_rs": round(charges, 2),
+            "net_rs": round(pnl - charges, 2),
+        }
+        self._record_trade(trade)
+        self._save_positions()
+        self.log("trade", f"CLOSED {p['option_symbol']} @ ₹{exit_price:.2f} ({reason}) "
+                          f"— net ₹{trade['net_rs']:+,.2f}")
+
+    async def manual_exit(self, pos_id: str) -> bool:
         now = datetime.now(TZ)
+        p = next((x for x in self.positions if x["id"] == pos_id and x["status"] == "open"), None)
+        if not p:
+            return False
+        price = p.get("ltp") or p["sell_price"]
+        try:
+            m = await self.client.ltp([p["option_key"]])
+            price = m.get(p["option_key"], price)
+        except UpstoxError:
+            pass
+        if self.cfg.mode == "live":
+            try:
+                if p.get("gtt_id"):
+                    await self.client.cancel_gtt(p["gtt_id"])
+                await self.client.place_order(
+                    instrument_token=p["option_key"], quantity=p["qty"],
+                    transaction_type="BUY", order_type="MARKET", product="D",
+                    tag="eod-manual-exit")
+            except UpstoxError as e:
+                self.log("error", f"Manual exit failed for {p['symbol']}: {e}")
+                return False
+        self._close(p, exit_price=price, reason="manual", now=now)
+        return True
+
+    # ---------- status ----------
+    def status(self) -> dict:
+        now = datetime.now(TZ)
+        opens = [p for p in self.positions if p["status"] == "open"]
+        for p in opens:
+            up = (p["sell_price"] - (p.get("ltp") or p["sell_price"])) * p["qty"]
+            p["unreal_rs"] = round(up, 2)
         return {
             "now_ist": now.strftime("%Y-%m-%d %H:%M:%S"),
             "market_open": self.market_hours(now),
-            "spot": self.spot_ltp, "expiry": self.selector.expiry,
-            "lot_size": self.selector.lot_size, "capital": self.cfg.capital,
-            "strategies": {str(k): v for k, v in STRATEGIES.items()},
-            "engines": {f"{t}m": self.engines[t].status() for t in TIMEFRAMES},
+            "running": self.running, "config": asdict(self.cfg),
+            "universe_count": self.universe_count, "last_scan_at": self.last_scan_at,
+            "phase": self.phase, "scan_result": self.scan_result,
+            "candidates": self.candidates,
+            "positions": opens,
             "trades": list(reversed(self.trades)),
-            "events": list(self.events)[:120],
+            "events": list(self.events)[:150],
         }

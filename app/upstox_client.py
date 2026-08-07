@@ -6,6 +6,8 @@ Upstox; paper mode only simulates *execution*, always at real market prices.
 """
 from __future__ import annotations
 
+import gzip
+import io
 import json
 import time
 import urllib.parse
@@ -13,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from .config import TOKEN_FILE
+from .config import INSTRUMENTS_URL, TOKEN_FILE
 
 V2 = "https://api.upstox.com/v2"
 V3 = "https://api.upstox.com/v3"
@@ -131,14 +133,50 @@ class UpstoxClient:
 
     async def ltp(self, instrument_keys: list[str]) -> dict[str, float]:
         """Last traded prices keyed by instrument_key."""
-        data = await self._get(f"{V3}/market-quote/ltp",
-                               params={"instrument_key": ",".join(instrument_keys)})
         out: dict[str, float] = {}
-        for item in data.values():
-            token = item.get("instrument_token")
-            if token is not None and item.get("last_price") is not None:
-                out[token] = float(item["last_price"])
+        for batch in _chunks(instrument_keys, 400):
+            data = await self._get(f"{V3}/market-quote/ltp",
+                                   params={"instrument_key": ",".join(batch)})
+            for item in data.values():
+                token = item.get("instrument_token")
+                if token is not None and item.get("last_price") is not None:
+                    out[token] = float(item["last_price"])
         return out
+
+    async def full_quote(self, instrument_keys: list[str]) -> dict[str, dict]:
+        """Full quote per instrument: {key: {ltp, open, high, low, close, oi}}.
+        `high`/`low` are the intraday day extremes used by the strength screen."""
+        out: dict[str, dict] = {}
+        for batch in _chunks(instrument_keys, 200):
+            data = await self._get(f"{V2}/market-quote/quotes",
+                                   params={"instrument_key": ",".join(batch)})
+            for item in data.values():
+                token = item.get("instrument_token")
+                ohlc = item.get("ohlc") or {}
+                if token is None:
+                    continue
+                out[token] = {
+                    "ltp": _f(item.get("last_price")),
+                    "open": _f(ohlc.get("open")), "high": _f(ohlc.get("high")),
+                    "low": _f(ohlc.get("low")), "close": _f(ohlc.get("close")),
+                    "oi": _f(item.get("oi")), "volume": _f(item.get("volume")),
+                }
+        return out
+
+    # ---------------- F&O universe (instruments master) ----------------
+
+    async def instruments_nse(self) -> list[dict]:
+        """Download + parse the public NSE instruments master (gzipped JSON).
+        No auth required. Returns the raw instrument records."""
+        resp = await self._http.get(INSTRUMENTS_URL, timeout=60.0)
+        if resp.status_code != 200:
+            raise UpstoxError(f"Instruments master HTTP {resp.status_code}")
+        raw = resp.content
+        try:
+            raw = gzip.decompress(raw)
+        except (OSError, gzip.BadGzipFile):
+            pass  # already-decompressed (some CDNs auto-gunzip)
+        return json.loads(raw.decode("utf-8"))
 
     # ---------------- options ----------------
 
@@ -206,5 +244,57 @@ class UpstoxClient:
                                        headers=self._headers(), params={"order_id": order_id})
         self._unwrap(resp)
 
+    # ---------------- GTT (exchange-side exits) ----------------
+
+    async def place_gtt(self, *, instrument_token: str, quantity: int,
+                        transaction_type: str, target_price: float,
+                        stop_price: float, product: str = "D") -> str:
+        """Create an OCO GTT with a TARGET rule and a STOPLOSS rule on one
+        instrument (Upstox GTT v3). Returns the gtt order id."""
+        payload = {
+            "type": "MULTIPLE", "quantity": quantity, "product": product,
+            "instrument_token": instrument_token,
+            "transaction_type": transaction_type,
+            "rules": [
+                {"strategy": "TARGET", "trigger_type": "IMMEDIATE",
+                 "trigger_price": round(target_price, 2)},
+                {"strategy": "STOPLOSS", "trigger_type": "IMMEDIATE",
+                 "trigger_price": round(stop_price, 2)},
+            ],
+        }
+        resp = await self._http.post(f"{V3}/order/gtt/place", headers={
+            **self._headers(), "Content-Type": "application/json"}, json=payload)
+        data = self._unwrap(resp)
+        gid = (data.get("gtt_order_ids") or [data.get("gtt_order_id")])
+        gid = [g for g in gid if g]
+        if not gid:
+            raise UpstoxError(f"GTT placement returned no id: {data}")
+        return gid[0]
+
+    async def gtt_details(self, gtt_order_id: str) -> dict:
+        data = await self._get(f"{V3}/order/gtt", params={"gtt_order_id": gtt_order_id})
+        if isinstance(data, list):
+            return data[0] if data else {}
+        return data
+
+    async def cancel_gtt(self, gtt_order_id: str) -> None:
+        resp = await self._http.request(
+            "DELETE", f"{V3}/order/gtt/cancel",
+            headers={**self._headers(), "Content-Type": "application/json"},
+            json={"gtt_order_id": gtt_order_id})
+        self._unwrap(resp)
+
     async def close(self) -> None:
         await self._http.aclose()
+
+
+def _f(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _chunks(seq: list, n: int):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]

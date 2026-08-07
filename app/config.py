@@ -1,17 +1,10 @@
-"""Configuration for the SMA+EMA dual-average scalping system.
+"""Configuration for the NSE EOD Momentum options-selling strategy.
 
-Strategy (spot NIFTY 50, per timeframe, close values only):
-  Long  (buy CE): enter when a completed candle CLOSES above BOTH the SMA and
-                  the EMA; exit when a candle CLOSES below EITHER.
-  Short (buy PE): enter when a completed candle CLOSES below BOTH; exit when a
-                  candle CLOSES above EITHER.
-
-Three independent engines run on the 1-, 5- and 15-minute charts. All candles
-are built locally from 1-minute data (Upstox's own 5m/15m aggregates finalize
-late), so what the chart shows is exactly what the engine trades on.
-
-Paper mode opens BOTH an ATM and an ITM option per signal and tracks them
-separately so the two can be compared. Live mode trades one (configurable).
+At 3:15 PM the system scans all NSE F&O-eligible stocks and ranks them by how
+close spot is to the day's high/low. At 3:24:50 it re-scans the shortlist on
+live prices and picks the definitive top N. At 3:25 it SELLS an OTM option on
+each (PUT for a stock near its high / CALL for a stock near its low), and
+attaches a +TP% / -SL% exit. Positions are carried overnight.
 """
 from __future__ import annotations
 
@@ -30,15 +23,20 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 CONFIG_FILE = DATA_DIR / "config.json"
 TOKEN_FILE = DATA_DIR / "token.json"
+POSITIONS_FILE = DATA_DIR / "positions.json"
+UNIVERSE_FILE = DATA_DIR / "universe.json"
 
-SPOT_INSTRUMENT_KEY = "NSE_INDEX|Nifty 50"
 IST = "Asia/Kolkata"
-TIMEFRAMES = (1, 5, 15)
+# Upstox NSE instruments master (public, gzipped JSON)
+INSTRUMENTS_URL = "https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz"
 
 
-def parse_hhmm(s: str) -> time:
-    h, m = s.split(":")
-    return time(int(h), int(m))
+def parse_hms(s: str) -> time:
+    """Parse 'HH:MM' or 'HH:MM:SS'."""
+    parts = [int(p) for p in s.split(":")]
+    while len(parts) < 3:
+        parts.append(0)
+    return time(parts[0], parts[1], parts[2])
 
 
 @dataclass
@@ -51,74 +49,55 @@ class EnvSettings:
 
 
 @dataclass
-class TFConfig:
-    """Per-timeframe account settings. No strategy is configured — signal logic
-    is added on top of this scaffold. Paper/live and lots are retained so a new
-    strategy can trade immediately once wired in."""
-    timeframe: int
-    enabled: bool = False
-    mode: str = "paper"          # "paper" | "live"
-    lots: int = 1
+class EODConfig:
+    mode: str = "paper"            # "paper" | "live"
+    top_n: int = 1                 # how many top-ranked stocks to trade
+    lots: int = 1                  # option lots per stock
+    otm_strikes: int = 5           # max OTM distance from spot (strikes)
+    tp_pct: float = 5.0            # take-profit: option price drops this % (seller gain)
+    sl_pct: float = 20.0           # stop-loss: option price rises this % (seller loss)
+    scan_time: str = "15:15"       # initial stock scan (IST)
+    refresh_time: str = "15:24:50" # pre-exec rescan of the shortlist
+    dispatch_time: str = "15:25"   # place the sell orders + exits
+    shortlist_size: int = 15       # how many to carry from scan -> refresh
+    min_oi: float = 0.0            # skip option strikes below this OI (0 = off)
+    max_spread_pct: float = 5.0    # skip strikes with bid/ask spread% above this (0 = off)
+    universe_limit: int = 0        # cap stocks scanned (0 = all F&O; >0 for speed/testing)
+    capital: float = 100000.0
+    charges_per_trade: float = 40.0  # round-trip cost per option leg, for net P&L
 
     def validate(self) -> None:
-        if self.timeframe not in TIMEFRAMES:
-            raise ValueError(f"timeframe must be one of {TIMEFRAMES}")
         if self.mode not in ("paper", "live"):
             raise ValueError("mode must be 'paper' or 'live'")
-        if self.lots < 1:
-            raise ValueError("lots must be >= 1")
+        for k in ("top_n", "lots", "otm_strikes", "shortlist_size"):
+            if int(getattr(self, k)) < 1:
+                raise ValueError(f"{k} must be >= 1")
+        if self.tp_pct <= 0 or self.tp_pct >= 100:
+            raise ValueError("tp_pct must be between 0 and 100")
+        if self.sl_pct <= 0:
+            raise ValueError("sl_pct must be > 0")
+        for k in ("scan_time", "refresh_time", "dispatch_time"):
+            parse_hms(getattr(self, k))  # raises on bad format
+        if self.top_n > self.shortlist_size:
+            raise ValueError("top_n cannot exceed shortlist_size")
 
 
-@dataclass
-class AppConfig:
-    capital: float = 30000.0
-    round_trip_charges: float = 56.0        # per option round trip, for net P&L
-    no_entries_after: str = "15:00"
-    square_off_at: str = "15:15"
-    candle_grace_sec: int = 6               # wait this long after a candle ends
-    tf: dict = field(default_factory=lambda: {
-        str(t): asdict(TFConfig(timeframe=t)) for t in TIMEFRAMES})
-
-    def tfcfg(self, timeframe: int) -> TFConfig:
-        return TFConfig(**self.tf[str(timeframe)])
-
-    def set_tf(self, timeframe: int, cfg: TFConfig) -> None:
-        cfg.validate()
-        self.tf[str(timeframe)] = asdict(cfg)
-
-    def validate(self) -> None:
-        for t in TIMEFRAMES:
-            self.tfcfg(t).validate()
-
-
-def load_config() -> AppConfig:
-    cfg = AppConfig()
+def load_config() -> EODConfig:
+    cfg = EODConfig()
     if CONFIG_FILE.exists():
         try:
             saved = json.loads(CONFIG_FILE.read_text())
             for k, v in saved.items():
-                if k == "tf" and isinstance(v, dict):
-                    for tk, tv in v.items():
-                        if tk in cfg.tf and isinstance(tv, dict):
-                            cfg.tf[tk].update({kk: vv for kk, vv in tv.items()
-                                               if kk in cfg.tf[tk]})
-                elif hasattr(cfg, k):
+                if hasattr(cfg, k):
                     setattr(cfg, k, v)
         except Exception:
             pass
-    # self-heal: a stale/invalid saved value (e.g. an old strategy id) must not
-    # crash startup — reset only the offending timeframe to its defaults
-    for t in TIMEFRAMES:
-        try:
-            cfg.tfcfg(t).validate()
-        except (ValueError, TypeError):
-            cfg.tf[str(t)] = asdict(TFConfig(timeframe=t))
     try:
         cfg.validate()
     except (ValueError, TypeError):
-        cfg = AppConfig()
+        cfg = EODConfig()   # self-heal a bad/stale saved config
     return cfg
 
 
-def save_config(cfg: AppConfig) -> None:
+def save_config(cfg: EODConfig) -> None:
     CONFIG_FILE.write_text(json.dumps(asdict(cfg), indent=2))

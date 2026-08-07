@@ -1,18 +1,16 @@
-"""ATM contract selection from the live Upstox option chain.
+"""OTM option selection for a screened stock.
 
-For a signal side (CE for long, PE for short) this returns the ATM contract.
-delta / OI / spread are attached for logging.
+For a bullish stock (sell PUT) pick a strike below spot; for a bearish stock
+(sell CALL) pick a strike above spot — both within `otm_strikes` of ATM. Among
+the in-range strikes the most liquid (highest OI, tightest bid/ask spread) that
+clears the OI/spread floors is chosen.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
-from .config import IST, SPOT_INSTRUMENT_KEY, TFConfig
+from .config import EODConfig
 from .upstox_client import UpstoxClient, UpstoxError
-
-TZ = ZoneInfo(IST)
 
 
 @dataclass
@@ -30,64 +28,65 @@ class Contract:
     spot: float
 
 
-class OptionSelector:
-    def __init__(self, client: UpstoxClient):
-        self.client = client
-        self._expiry: str | None = None
-        self._lot_size: int | None = None
-        self._symbols: dict[str, str] = {}
-        self._loaded_day: str | None = None
+async def select_otm(client: UpstoxClient, cfg: EODConfig, *, equity_key: str,
+                     expiry: str, side: str, spot: float, lot_size: int) -> Contract:
+    """Choose the OTM contract to SELL for a screened stock."""
+    chain = await client.option_chain(equity_key, expiry)
+    if not chain:
+        raise UpstoxError(f"Empty option chain for {equity_key} {expiry}")
+    ref_spot = float(chain[0].get("underlying_spot_price") or spot or 0.0)
+    strikes = sorted({float(r["strike_price"]) for r in chain})
+    if not strikes:
+        raise UpstoxError("No strikes in chain")
+    atm = min(strikes, key=lambda s: abs(s - ref_spot))
+    ai = strikes.index(atm)
+    # OTM direction: PUT below spot, CALL above spot
+    if side == "PE":
+        cand_strikes = [s for s in strikes[max(0, ai - cfg.otm_strikes):ai] if s < ref_spot]
+    else:
+        cand_strikes = [s for s in strikes[ai + 1:ai + 1 + cfg.otm_strikes] if s > ref_spot]
+    if not cand_strikes:
+        raise UpstoxError(f"No OTM {side} strikes within {cfg.otm_strikes} of {ref_spot}")
 
-    async def _load(self) -> None:
-        today = datetime.now(TZ).strftime("%Y-%m-%d")
-        if self._loaded_day == today and self._expiry and self._expiry >= today:
-            return
-        contracts = await self.client.option_contracts(SPOT_INSTRUMENT_KEY)
-        expiries = sorted({c["expiry"] for c in contracts if c.get("expiry", "") >= today})
-        if not expiries:
-            raise UpstoxError("No NIFTY option expiries from Upstox")
-        self._expiry = expiries[0]
-        near = [c for c in contracts if c["expiry"] == self._expiry]
-        self._lot_size = int(near[0].get("lot_size") or 75)
-        self._symbols = {c["instrument_key"]: c.get("trading_symbol", c["instrument_key"])
-                         for c in near}
-        self._loaded_day = today
+    leg_key = "put_options" if side == "PE" else "call_options"
+    by_strike = {float(r["strike_price"]): r for r in chain}
 
-    @property
-    def expiry(self) -> str | None:
-        return self._expiry
-
-    @property
-    def lot_size(self) -> int | None:
-        return self._lot_size
-
-    async def select(self, side: str) -> Contract:
-        """Return the ATM contract for the given side."""
-        await self._load()
-        chain = await self.client.option_chain(SPOT_INSTRUMENT_KEY, self._expiry)
-        if not chain:
-            raise UpstoxError("Empty option chain from Upstox")
-        spot = float(chain[0].get("underlying_spot_price") or 0.0)
-        strikes = sorted({float(r["strike_price"]) for r in chain})
-        atm_strike = min(strikes, key=lambda s: abs(s - spot))
-        leg_key = "call_options" if side == "CE" else "put_options"
-        row = next((r for r in chain if float(r["strike_price"]) == atm_strike), None)
-        leg = (row or {}).get(leg_key) or {}
+    def build(strike: float) -> Contract | None:
+        leg = (by_strike.get(strike) or {}).get(leg_key) or {}
         md = leg.get("market_data") or {}
         gk = leg.get("option_greeks") or {}
         ikey = leg.get("instrument_key")
         ltp = float(md.get("ltp") or 0.0)
         if not ikey or ltp <= 0:
-            raise UpstoxError(f"No tradeable ATM {side} contract (spot {spot})")
+            return None
         delta = gk.get("delta")
-        delta = abs(float(delta)) if delta is not None else None
+        delta = float(delta) if delta is not None else None
         oi = md.get("oi")
         oi = float(oi) if oi is not None else None
         bid = float(md.get("bid_price") or 0.0)
         ask = float(md.get("ask_price") or 0.0)
         spread_pct = (ask - bid) / ltp * 100 if (bid > 0 and ask > 0) else None
         return Contract(instrument_key=ikey,
-                        trading_symbol=self._symbols.get(ikey, ikey),
-                        side=side, strike=atm_strike, expiry=self._expiry or "",
-                        ltp=ltp, delta=delta, oi=oi, spread_pct=spread_pct,
-                        lot_size=self._lot_size or 75, spot=spot)
+                        trading_symbol=leg.get("trading_symbol") or ikey,
+                        side=side, strike=strike, expiry=expiry, ltp=ltp,
+                        delta=delta, oi=oi, spread_pct=spread_pct,
+                        lot_size=lot_size, spot=ref_spot)
+
+    cands = [c for c in (build(s) for s in cand_strikes) if c]
+    if not cands:
+        raise UpstoxError(f"No quotable OTM {side} contract for {equity_key}")
+
+    def passes(c: Contract) -> bool:
+        if cfg.min_oi and c.oi is not None and c.oi < cfg.min_oi:
+            return False
+        if cfg.max_spread_pct and c.spread_pct is not None and c.spread_pct > cfg.max_spread_pct:
+            return False
+        return True
+
+    filtered = [c for c in cands if passes(c)] or cands   # fall back if all filtered out
+
+    def score(c: Contract):
+        oi = c.oi or 0.0
+        sp = c.spread_pct if c.spread_pct is not None else 99.0
+        return (oi, -sp)
+    return max(filtered, key=score)

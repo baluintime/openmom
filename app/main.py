@@ -1,4 +1,4 @@
-"""FastAPI app: REST API + the dashboard (3 timeframe pages)."""
+"""FastAPI app: REST API + dashboard for the NSE EOD Momentum strategy."""
 from __future__ import annotations
 
 from dataclasses import asdict
@@ -7,17 +7,21 @@ from pathlib import Path
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse, Response
 
-from .config import (DATA_DIR, EnvSettings, TIMEFRAMES, TFConfig, load_config, save_config)
-from .engine import Engine, TRADES_FILE
+from .config import (DATA_DIR, EODConfig, EnvSettings, load_config, save_config)
+from .engine import EODEngine, TRADES_FILE
 from .upstox_client import UpstoxClient, UpstoxError
 
 FRONTEND = Path(__file__).resolve().parent.parent / "frontend" / "index.html"
 
 env = EnvSettings()
 client = UpstoxClient(env.api_key, env.api_secret, env.redirect_uri)
-engine = Engine(client, load_config())
+engine = EODEngine(client, load_config())
 
-app = FastAPI(title="NIFTY Renko vs Ichimoku Options Scalper (Upstox)")
+app = FastAPI(title="NSE EOD Momentum Options Strategy (Upstox)")
+
+_INT = {"top_n", "lots", "otm_strikes", "shortlist_size", "universe_limit"}
+_NUM = {"tp_pct", "sl_pct", "min_oi", "max_spread_pct", "capital", "charges_per_trade"}
+_STR = {"mode", "scan_time", "refresh_time", "dispatch_time"}
 
 
 @app.on_event("startup")
@@ -63,8 +67,7 @@ async def auth_token(body: dict = Body(...)):
 @app.post("/api/auth/logout")
 async def auth_logout():
     client.clear_token()
-    for t in TIMEFRAMES:
-        engine.engines[t].running = False
+    engine.running = False
     engine.log("auth", "Disconnected from Upstox")
     return {"ok": True}
 
@@ -90,24 +93,52 @@ async def status():
 
 
 @app.post("/api/start")
-async def start(body: dict = Body(...)):
-    tf = int(body.get("tf", 0))
-    if tf not in TIMEFRAMES:
-        raise HTTPException(400, "tf must be 1, 5 or 15")
+async def start():
     try:
-        engine.start(tf)
+        engine.start()
     except UpstoxError as e:
         raise HTTPException(400, str(e))
-    return {"tf": tf, "running": True}
+    return {"running": True}
 
 
 @app.post("/api/stop")
-async def stop(body: dict = Body(...)):
-    tf = int(body.get("tf", 0))
-    if tf not in TIMEFRAMES:
-        raise HTTPException(400, "tf must be 1, 5 or 15")
-    engine.stop(tf)
-    return {"tf": tf, "running": False}
+async def stop():
+    engine.stop()
+    return {"running": False}
+
+
+@app.post("/api/scan")
+async def scan():
+    """Run the scan + refresh now (does not place orders)."""
+    if not client.access_token:
+        raise HTTPException(400, "Connect to Upstox first")
+    try:
+        cands = await engine.scan_now()
+    except UpstoxError as e:
+        raise HTTPException(400, str(e))
+    return {"candidates": cands, "shortlist": engine.scan_result}
+
+
+@app.post("/api/dispatch")
+async def dispatch():
+    """Force the sell dispatch now (manual trigger; normally fires at 3:25 PM)."""
+    if not client.access_token:
+        raise HTTPException(400, "Connect to Upstox first")
+    if not engine.candidates:
+        raise HTTPException(400, "No candidates — run a scan first")
+    from datetime import datetime
+    from .engine import TZ
+    await engine._dispatch(datetime.now(TZ))
+    return {"positions": [p for p in engine.positions if p["status"] == "open"]}
+
+
+@app.post("/api/exit")
+async def manual_exit(body: dict = Body(...)):
+    pid = body.get("id")
+    ok = await engine.manual_exit(pid)
+    if not ok:
+        raise HTTPException(400, "Position not found or already closed")
+    return {"ok": True}
 
 
 @app.get("/api/config")
@@ -117,28 +148,20 @@ async def get_config():
 
 @app.post("/api/config")
 async def set_config(body: dict = Body(...)):
-    cfg = engine.cfg
-    for k in ("capital", "round_trip_charges", "no_entries_after",
-              "square_off_at", "candle_grace_sec"):
-        if k in body:
-            setattr(cfg, k, body[k])
-    _int_fields = {"lots", "timeframe"}
-    if "tf" in body and isinstance(body["tf"], dict):
-        for tk, tv in body["tf"].items():
-            if tk in cfg.tf and isinstance(tv, dict):
-                merged = dict(cfg.tf[tk])
-                for k, v in tv.items():
-                    if k in merged:
-                        merged[k] = int(v) if (k in _int_fields and v is not None) else v
-                try:
-                    TFConfig(**merged).validate()
-                except (ValueError, TypeError) as e:
-                    raise HTTPException(400, f"{tk}m: {e}")
-                cfg.tf[tk] = merged
+    cur = asdict(engine.cfg)
+    for k, v in body.items():
+        if k in _INT:
+            cur[k] = int(v)
+        elif k in _NUM:
+            cur[k] = float(v)
+        elif k in _STR:
+            cur[k] = v
     try:
+        cfg = EODConfig(**cur)
         cfg.validate()
-    except ValueError as e:
+    except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
+    engine.cfg = cfg
     save_config(cfg)
     engine.log("config", "Settings updated")
     return asdict(cfg)
@@ -150,22 +173,20 @@ async def trades():
 
 
 EXPORT_COLUMNS = [
-    ("day", "Day"), ("tf", "Timeframe"), ("mode", "Mode"),
-    ("strategy", "Strategy #"), ("strategy_name", "Strategy"), ("side", "Side"),
-    ("symbol", "Contract"), ("strike", "Strike"), ("qty", "Qty"),
-    ("entry_time", "Entry Time"), ("exit_time", "Exit Time"),
-    ("entry", "Entry Premium"), ("exit", "Exit Premium"),
-    ("entry_index", "Index @ Entry"), ("exit_index", "Index @ Exit"),
-    ("index_points", "Index Points"), ("points", "Premium Points"),
+    ("entry_day", "Entry Day"), ("exit_day", "Exit Day"), ("mode", "Mode"),
+    ("symbol", "Stock"), ("bias", "Bias"), ("side", "Option"),
+    ("option_symbol", "Contract"), ("strike", "Strike"), ("expiry", "Expiry"),
+    ("qty", "Qty"), ("spot_at_entry", "Spot @ Entry"),
+    ("sell_price", "Sell ₹"), ("exit_price", "Exit ₹"), ("points", "Points"),
     ("gross_rs", "Gross ₹"), ("charges_rs", "Charges ₹"), ("net_rs", "Net ₹"),
-    ("reason", "Exit Reason"),
+    ("entry_time", "Entry Time"), ("exit_time", "Exit Time"), ("reason", "Exit Reason"),
 ]
 
 
 def _all_trades() -> list[dict]:
+    import json
     out = []
     if TRADES_FILE.exists():
-        import json
         for line in TRADES_FILE.read_text().splitlines():
             try:
                 out.append(json.loads(line))
@@ -179,14 +200,14 @@ async def trades_xlsx(scope: str = "all"):
     rows = engine.trades if scope == "today" else _all_trades()
     keys = [k for k, _ in EXPORT_COLUMNS]
     headers = [h for _, h in EXPORT_COLUMNS]
-    fname = f"nifty-trades-{'today' if scope == 'today' else 'all'}.xlsx"
+    fname = f"nse-eod-trades-{'today' if scope == 'today' else 'all'}.xlsx"
     try:
         from io import BytesIO
         from openpyxl import Workbook
         from openpyxl.styles import Font
         wb = Workbook()
         ws = wb.active
-        ws.title = "Trades"
+        ws.title = "EOD Trades"
         ws.append(headers)
         for c in ws[1]:
             c.font = Font(bold=True)
@@ -202,7 +223,6 @@ async def trades_xlsx(scope: str = "all"):
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
     except ImportError:
-        # openpyxl not installed — fall back to CSV (opens in Excel)
         import csv
         import io
         sio = io.StringIO()
@@ -211,8 +231,7 @@ async def trades_xlsx(scope: str = "all"):
         for t in rows:
             w.writerow([t.get(k) for k in keys])
         return Response(sio.getvalue(), media_type="text/csv",
-                        headers={"Content-Disposition":
-                                 f'attachment; filename="{fname[:-5]}.csv"'})
+                        headers={"Content-Disposition": f'attachment; filename="{fname[:-5]}.csv"'})
 
 
 def main() -> None:
