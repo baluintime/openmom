@@ -122,8 +122,7 @@ async def set_config(body: dict = Body(...)):
               "square_off_at", "candle_grace_sec"):
         if k in body:
             setattr(cfg, k, body[k])
-    _int_fields = {"lots", "live_strategy", "atr_period", "ema_filter_period",
-                   "tenkan", "kijun", "senkou_b", "displacement", "timeframe"}
+    _int_fields = {"lots", "timeframe"}
     if "tf" in body and isinstance(body["tf"], dict):
         for tk, tv in body["tf"].items():
             if tk in cfg.tf and isinstance(tv, dict):

@@ -1,10 +1,10 @@
-"""Three independent SMA/EMA engines (1m, 5m, 15m) on the NIFTY spot chart.
+"""Per-timeframe engines (1m, 5m, 15m) on the NIFTY spot chart.
 
-Within each timeframe, three strategies are compared (see strategy.py). In
-paper mode all three run in parallel, each with its own position, all trading
-the ATM option (long -> CE, short -> PE). In live mode only the configured
-strategy trades. Because the three share the same SMA/EMA on the same candles,
-the comparison is apples-to-apples.
+No strategy is currently wired in (see app/strategy.py) — the engines refresh
+the live feed, manage any open positions, and serve status/reports, but open
+no new trades. The position/broker plumbing (_enter, _settle, _finalize) is
+retained so a new strategy can trade immediately once its decision logic is
+added to the tick loop.
 """
 from __future__ import annotations
 
@@ -18,10 +18,9 @@ from zoneinfo import ZoneInfo
 from .broker import FILLED, REJECTED, LiveBroker, PaperBroker
 from .config import (DATA_DIR, IST, SPOT_INSTRUMENT_KEY, TIMEFRAMES, AppConfig,
                      parse_hhmm)
-from .market import SpotFeed, ema_series
+from .market import SpotFeed
 from .options import OptionSelector
-from .renko import RenkoState, seed_from_candles
-from .strategy import STRATEGIES, brick_size, context, decide, ichimoku
+from .strategy import STRATEGIES, name as strat_name
 from .upstox_client import UpstoxClient, UpstoxError
 
 TZ = ZoneInfo(IST)
@@ -29,17 +28,15 @@ TRADES_FILE = DATA_DIR / "trades.jsonl"
 
 
 class TFEngine:
-    """One timeframe: a feed plus one slot per active strategy."""
+    """One timeframe: a feed plus (currently) no active strategy."""
 
     def __init__(self, parent: "Engine", timeframe: int):
         self.parent = parent
         self.tf = timeframe
         self.feed = SpotFeed(parent.client, timeframe, parent.cfg.candle_grace_sec)
         self.running = False
-        # slot per strategy id: {"side","position","handled","pending_entry"}
+        # slot per active strategy id: {"side","position","handled","pending_entry"}
         self.slots: dict[int, dict] = {}
-        self.renko: RenkoState | None = None   # tick-driven, fed by live spot
-        self.renko_brick: float | None = None
 
     def cfg(self):
         return self.parent.cfg.tfcfg(self.tf)
@@ -52,8 +49,8 @@ class TFEngine:
         self.parent.log(kind, msg, tf=self.tf)
 
     def active_strats(self) -> list[int]:
-        c = self.cfg()
-        return [c.live_strategy] if c.mode == "live" else [1, 2]
+        # No strategy configured. A future strategy returns its id(s) here.
+        return list(STRATEGIES)
 
     def _sync_slots(self):
         want = set(self.active_strats())
@@ -61,149 +58,43 @@ class TFEngine:
             self.slots.setdefault(sid, {"side": None, "position": None,
                                         "handled": None, "pending_entry": None})
         for sid in list(self.slots):
-            # keep a slot with an open position even if it left the active set
             if sid not in want and not self.slots[sid]["position"]:
                 del self.slots[sid]
 
     async def tick(self, now: datetime, ltp_map: dict):
-        new = await self.feed.refresh()
+        await self.feed.refresh()
         if self.feed.note:
             self.log("data", self.feed.note)
             self.feed.note = None
         self._sync_slots()
 
-        # update LTPs on open legs
-        for slot in self.slots.values():
+        # keep any open positions' LTPs fresh and settle/flatten them
+        for sid in list(self.slots):
+            slot = self.slots[sid]
             pos = slot["position"]
             if pos:
                 lp = ltp_map.get(pos["option"]["instrument_key"])
                 if lp:
                     pos["ltp"] = lp
-
-        if not self.feed.candles:
-            return
-        candles = self.feed.candles
-        last = candles[-1]
-        spot = self.parent.spot_ltp
-        self._update_renko(candles, spot)   # feed the live tick into the brick engine
-
-        square = (now.time() >= parse_hhmm(self.parent.cfg.square_off_at)
-                  or not self.parent.market_hours(now))
-        can_enter = (self.running and self.parent.market_hours(now)
-                     and now.time() < parse_hhmm(self.parent.cfg.no_entries_after)
-                     and not square)
-
-        for sid in list(self.slots):
-            slot = self.slots[sid]
-            await self._settle(sid, now, ltp_map)   # settle in-flight fills first
+            await self._settle(sid, now, ltp_map)
             pos = slot["position"]
+            square = (now.time() >= parse_hhmm(self.parent.cfg.square_off_at)
+                      or not self.parent.market_hours(now))
             if pos and square and not pos.get("exiting"):
                 pos["exiting"] = "squareoff"
                 slot["pending_entry"] = None
                 await self._place_exit(sid)
-                self.log("trade", f"[{STRATEGIES[sid]['name']}] EXIT (squareoff)")
-                continue
-            if sid == 1:                    # Renko: evaluated every tick
-                await self._decide_renko(now, spot, candles, can_enter)
-            else:                           # Ichimoku: evaluated per completed candle
-                await self._decide_ichimoku(now, candles, last, new, can_enter)
+                self.log("trade", f"[{strat_name(sid)}] EXIT (squareoff)")
 
-    def _update_renko(self, candles, spot):
-        cfg = self.cfg()
-        ib = max(1.0, round(brick_size(candles, cfg)))   # whole-point brick, stable
-        if self.renko is None or self.renko_brick != ib:
-            self.renko = RenkoState(ib)
-            self.renko_brick = ib
-            seed_from_candles(self.renko, candles)
-        if spot:
-            self.renko.update(spot)
+        # --- strategy decisions would run here (none configured) ---
 
-    async def _decide_renko(self, now, spot, candles, can_enter):
-        slot = self.slots.get(1)
-        if slot is None or self.renko is None or spot is None:
-            return
-        cfg = self.cfg()
-        bricks = self.renko.bricks
-        ema = ema_series([c.close for c in candles], cfg.ema_filter_period)
-        e = ema[-1] if ema else None
-        if e is None or len(bricks) < 2:
-            return
-        pos = slot["position"]
-        if pos and not pos.get("exiting"):
-            side = slot["side"]
-            reason = None
-            if side == "long":
-                if bricks[-1].dir == -1:
-                    reason = "renko_reversal"
-                elif spot <= pos.get("renko_sl", float("-inf")):
-                    reason = "renko_SL"
-                elif spot >= pos.get("renko_target", float("inf")):
-                    reason = "renko_target"
-            else:
-                if bricks[-1].dir == 1:
-                    reason = "renko_reversal"
-                elif spot >= pos.get("renko_sl", float("inf")):
-                    reason = "renko_SL"
-                elif spot <= pos.get("renko_target", float("-inf")):
-                    reason = "renko_target"
-            if reason:
-                pos["exiting"] = reason
-                slot["pending_entry"] = None
-                slot["renko_key"] = len(bricks)   # no re-entry until a new brick forms
-                await self._place_exit(1)
-                self.log("trade", f"[Renko] EXIT ({reason}) spot {spot:.2f} · "
-                                  f"{context(1, candles, cfg)}")
-            return
-        if pos or not can_enter:
-            return
-        up2 = bricks[-1].dir == 1 and bricks[-2].dir == 1
-        dn2 = bricks[-1].dir == -1 and bricks[-2].dir == -1
-        side = "long" if (up2 and spot > e) else "short" if (dn2 and spot < e) else None
-        if side is None:
-            return
-        if slot.get("renko_key") == len(bricks):   # one entry per brick sequence
-            return
-        slot["renko_key"] = len(bricks)
-        brick = self.renko.brick
-        first = self.renko.run_start()
-        if side == "long":
-            sl = first.wick_lo if first else spot - brick
-            target = spot + cfg.renko_target_bricks * brick
-        else:
-            sl = first.wick_hi if first else spot + brick
-            target = spot - cfg.renko_target_bricks * brick
-        await self._enter(1, now, side, candles[-1], context(1, candles, cfg),
-                          extra={"renko_sl": round(sl, 2), "renko_target": round(target, 2)})
-
-    async def _decide_ichimoku(self, now, candles, last, new, can_enter):
-        slot = self.slots.get(2)
-        if slot is None:
-            return
-        cfg = self.cfg()
-        key = last.ts.isoformat()
-        if slot["handled"] == key or not new:
-            return
-        slot["handled"] = key
-        desired = decide(2, candles, cfg, slot["side"])
-        if desired == slot["side"]:
-            return
-        ctx = context(2, candles, cfg)
-        pos = slot["position"]
-        if pos and not pos.get("exiting"):
-            pos["exiting"] = f"→{desired or 'flat'}"
-            slot["pending_entry"] = desired if desired in ("long", "short") else None
-            await self._place_exit(2)
-            self.log("trade", f"[Fast Ichimoku] EXIT ({last.ts:%H:%M} · {ctx}) "
-                              f"→ {desired or 'flat'}")
-        elif not pos and desired in ("long", "short") and can_enter:
-            await self._enter(2, now, desired, last, ctx)
-
-    async def _enter(self, sid, now, side, last, state, extra=None):
+    # ---- position/broker plumbing (reusable by a future strategy) ----
+    async def _enter(self, sid, now, side, last, note, extra=None):
         opt_side = "CE" if side == "long" else "PE"
         try:
             ct = await self.parent.selector.select(opt_side)
         except UpstoxError as e:
-            self.log("error", f"[{STRATEGIES[sid]['name']}] contract selection failed: {e}")
+            self.log("error", f"[{strat_name(sid)}] contract selection failed: {e}")
             return
         c = self.cfg()
         qty = c.lots * ct.lot_size
@@ -218,12 +109,9 @@ class TFEngine:
         if extra:
             position.update(extra)
         self.slots[sid].update({"side": side, "position": position})
-        sl_tgt = ""
-        if extra and "renko_sl" in extra:
-            sl_tgt = f" · SL {extra['renko_sl']:.2f} / target {extra['renko_target']:.2f}"
-        self.log("trade", f"[{STRATEGIES[sid]['name']}] {side.upper()} entry [{c.mode}] "
+        self.log("trade", f"[{strat_name(sid)}] {side.upper()} entry [{c.mode}] "
                           + (f"— index {idx:.2f} · " if idx else "— ")
-                          + f"{state}{sl_tgt} — buy {ct.trading_symbol}")
+                          + f"{note} — buy {ct.trading_symbol}")
 
     async def _place_exit(self, sid):
         pos = self.slots[sid]["position"]
@@ -236,23 +124,14 @@ class TFEngine:
         slot = self.slots[sid]
         pos = slot["position"]
         if not pos:
-            # a pending entry waiting for the slot to free
-            if slot["pending_entry"] and self.parent.market_hours(now):
-                side = slot["pending_entry"]
-                slot["pending_entry"] = None
-                last = self.feed.candles[-1]
-                ctx = context(sid, self.feed.candles, self.cfg())
-                await self._enter(sid, now, side, last, ctx)
             return
         lp = ltp_map.get(pos["option"]["instrument_key"])
-        # fill the entry market order
         if pos["entry_price"] is None:
             o = await self.broker().poll(pos["order"], lp)
             if o.status == FILLED:
                 pos["entry_price"] = o.avg_price
             elif o.status == REJECTED:
                 pos["entry_price"] = 0.0
-        # settle the exit market order
         if pos.get("exiting") and pos["exit_order"] is not None and pos["entry_price"] is not None:
             o = await self.broker().poll(pos["exit_order"], lp)
             if o.status == FILLED:
@@ -272,7 +151,7 @@ class TFEngine:
         exit_idx = self.parent.spot_ltp
         trade = {
             "day": now.strftime("%Y-%m-%d"), "tf": f"{self.tf}m", "mode": c.mode,
-            "strategy": sid, "strategy_name": STRATEGIES[sid]["name"],
+            "strategy": sid, "strategy_name": strat_name(sid),
             "side": "long" if pos["option"]["side"] == "CE" else "short",
             "symbol": pos["option"]["trading_symbol"], "strike": pos["option"]["strike"],
             "qty": pos["qty"], "entry_time": pos["entry_ts"],
@@ -287,7 +166,7 @@ class TFEngine:
             "reason": pos.get("exiting"),
         }
         self.parent.record_trade(trade)
-        self.log("trade", f"[{STRATEGIES[sid]['name']}] EXITED {trade['symbol']} "
+        self.log("trade", f"[{strat_name(sid)}] EXITED {trade['symbol']} "
                           f"@ ₹{exit_price:.2f}"
                           + (f" · index {exit_idx:.2f}" if exit_idx else "")
                           + f" — {pts:+.2f} pts, net ₹{trade['net_rs']:+,.2f}")
@@ -303,41 +182,23 @@ class TFEngine:
             ltp = pos.get("ltp") or 0
             upts = (ltp - entry) if entry else 0
             positions.append({
-                "strategy": sid, "strategy_name": STRATEGIES[sid]["name"],
+                "strategy": sid, "strategy_name": strat_name(sid),
                 "side": self.slots[sid]["side"], "symbol": pos["option"]["trading_symbol"],
                 "strike": pos["option"]["strike"], "qty": pos["qty"],
                 "entry": round(entry, 2) if entry else None, "ltp": round(ltp, 2),
                 "entry_time": pos["entry_ts"], "exiting": pos.get("exiting"),
-                "renko_sl": pos.get("renko_sl"), "renko_target": pos.get("renko_target"),
                 "unreal_pts": round(upts, 2), "unreal_rs": round(upts * pos["qty"], 2)})
-        bricks = [{"d": b.dir, "c": round(b.close, 2)}
-                  for b in (self.renko.bricks[-40:] if self.renko else [])]
         return {"tf": self.tf, "running": self.running, "config": asdict(c),
-                "feed": self._chart(c), "positions": positions,
-                "bricks": bricks, "brick_size": self.renko_brick}
+                "feed": self._chart(), "positions": positions}
 
-    def _chart(self, c, points: int = 90) -> dict:
-        """Close + EMA-20 (Renko overlay) + Tenkan/Kijun (Ichimoku) for the chart."""
-        cs = self.feed.candles
-        closes = [x.close for x in cs]
-        ema = ema_series(closes, c.ema_filter_period)
-        t, k, _sa, _sb = ichimoku(cs, c.tenkan, c.kijun, c.senkou_b) if cs else ([], [], [], [])
-        n = len(cs)
-        rng = range(max(0, n - points), n)
-        last = cs[-1] if cs else None
-        cur = lambda arr: (round(arr[-1], 2) if arr and arr[-1] is not None else None)
+    def _chart(self, points: int = 90) -> dict:
+        cs = self.feed.candles[-points:]
+        last = self.feed.candles[-1] if self.feed.candles else None
         return {
             "timeframe": self.tf,
             "last_ts": last.ts.strftime("%H:%M") if last else None,
             "last_close": round(last.close, 2) if last else None,
-            "ema": cur(ema), "tenkan": cur(t), "kijun": cur(k),
-            "brick": round(brick_size(cs, c), 2) if cs else None,
-            "series": [
-                {"t": cs[i].ts.strftime("%H:%M"), "c": round(cs[i].close, 2),
-                 "e": round(ema[i], 2) if ema[i] is not None else None,
-                 "tk": round(t[i], 2) if t[i] is not None else None,
-                 "kj": round(k[i], 2) if k[i] is not None else None}
-                for i in rng],
+            "series": [{"t": c.ts.strftime("%H:%M"), "c": round(c.close, 2)} for c in cs],
         }
 
 
@@ -358,11 +219,12 @@ class Engine:
         if not self.client.access_token:
             raise UpstoxError("Connect to Upstox before starting")
         self.engines[tf].running = True
-        self.log("engine", f"Engine started ({self.cfg.tfcfg(tf).mode})", tf=tf)
+        self.log("engine", f"Engine started ({self.cfg.tfcfg(tf).mode}) — "
+                           "no strategy configured", tf=tf)
 
     def stop(self, tf):
         self.engines[tf].running = False
-        self.log("engine", "Engine stopped (open positions still managed)", tf=tf)
+        self.log("engine", "Engine stopped", tf=tf)
 
     def ensure_loop(self):
         if self._task is None or self._task.done():
@@ -414,8 +276,7 @@ class Engine:
             except Exception as e:
                 self._note_error(f"{type(e).__name__}: {e}")
             in_mkt = self.market_hours(datetime.now(TZ))
-            # 1s in-market for tick-level Renko sampling of the index LTP
-            await asyncio.sleep(1 if (in_mkt and self.client.access_token) else 15)
+            await asyncio.sleep(2 if (in_mkt and self.client.access_token) else 15)
 
     def _note_error(self, msg):
         if msg != self._last_error:
@@ -438,26 +299,6 @@ class Engine:
         for e in self.engines.values():
             await e.tick(now, ltp_map)
 
-    def comparison(self) -> dict:
-        agg = {sid: {"trades": 0, "wins": 0, "net": 0.0, "points": 0.0}
-               for sid in (1, 2)}
-        for t in self.trades:
-            sid = t.get("strategy")
-            if sid in agg:
-                a = agg[sid]
-                a["trades"] += 1
-                a["wins"] += 1 if t["net_rs"] > 0 else 0
-                a["net"] = round(a["net"] + t["net_rs"], 2)
-                a["points"] = round(a["points"] + t["points"], 2)
-        for sid in agg:
-            n = agg[sid]["trades"]
-            agg[sid]["win_rate"] = round(100 * agg[sid]["wins"] / n, 1) if n else 0.0
-            agg[sid]["name"] = STRATEGIES[sid]["name"]
-            agg[sid]["desc"] = STRATEGIES[sid]["desc"]
-        traded = {sid: agg[sid] for sid in agg if agg[sid]["trades"]}
-        leader = max(traded, key=lambda s: traded[s]["net"]) if traded else None
-        return {"strategies": agg, "leader": leader}
-
     def status(self):
         now = datetime.now(TZ)
         return {
@@ -467,7 +308,6 @@ class Engine:
             "lot_size": self.selector.lot_size, "capital": self.cfg.capital,
             "strategies": {str(k): v for k, v in STRATEGIES.items()},
             "engines": {f"{t}m": self.engines[t].status() for t in TIMEFRAMES},
-            "comparison": self.comparison(),
             "trades": list(reversed(self.trades)),
             "events": list(self.events)[:120],
         }
