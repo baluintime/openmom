@@ -137,8 +137,8 @@
       </div>
     </div>
     <div style="overflow-x:auto;margin-top:8px"><table><thead><tr>
-      <th>Stock</th><th>Bias</th><th>Contract</th><th>Qty</th><th>Sell ₹</th><th>Exit ₹</th><th>Reason</th><th>Net ₹</th><th>Held</th>
-    </tr></thead><tbody id="tradeRows"><tr><td colspan="9" class="note">No closed trades today.</td></tr></tbody></table></div>
+      <th>Stock</th><th>Bias</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Sell ₹</th><th>Exit ₹</th><th>Reason</th><th>Net ₹</th><th>Held</th>
+    </tr></thead><tbody id="tradeRows"><tr><td colspan="10" class="note">No closed trades today.</td></tr></tbody></table></div>
   </section>
 
   <section class="card">
@@ -178,6 +178,9 @@ const api=async(p,o)=>{const r=await fetch(p,o);if(!r.ok){let m='Request failed'
 const post=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
 const fmt=(n,d=2)=>n==null?'—':Number(n).toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
 const rs=n=>n==null?'—':(n<0?'-':'')+'₹'+fmt(Math.abs(n));
+const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const fmtExp=e=>{if(!e)return '—';const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(e);return m?`${m[3]} ${MON[+m[2]-1]} ${m[1].slice(2)}`:e;};
+const strikeLabel=p=>`${fmt(p.strike,0)} ${p.side}`;
 const toast=m=>alert(m);
 
 async function refresh(){try{state=await api('/api/status');render();}catch(e){}}
@@ -235,9 +238,9 @@ function renderShortlist(rs_){
 function renderPositions(ps){
   const el=$('positions');
   if(!ps.length){el.innerHTML='<span class="note">No open positions.</span>';return;}
-  let h='<div style="overflow-x:auto"><table><thead><tr><th>Stock</th><th>Bias</th><th>Contract</th><th>Qty</th><th>Sell ₹</th><th>LTP</th><th>Target</th><th>Stop</th><th>Unrealized</th><th>Since</th><th></th></tr></thead><tbody>';
+  let h='<div style="overflow-x:auto"><table><thead><tr><th>Stock</th><th>Bias</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Sell ₹</th><th>LTP</th><th>Target</th><th>Stop</th><th>Unrealized</th><th>Since</th><th></th></tr></thead><tbody>';
   ps.forEach(p=>{const cls=(p.unreal_rs||0)>=0?'pos':'neg';
-    h+=`<tr><td><b>${p.symbol}</b></td><td>${biasChip(p.bias)}</td><td>${p.option_symbol}</td><td>${p.qty}</td>
+    h+=`<tr><td><b>${p.symbol}</b></td><td>${biasChip(p.bias)}</td><td>${strikeLabel(p)}</td><td>${fmtExp(p.expiry)}</td><td>${p.qty}</td>
       <td>${fmt(p.sell_price)}</td><td>${fmt(p.ltp)}</td><td>${fmt(p.target)}</td><td>${fmt(p.stop)}</td>
       <td class="${cls}"><b>${rs(p.unreal_rs)}</b></td><td>${p.entry_day} ${p.entry_time}</td>
       <td><button class="small danger" onclick="exitPos('${p.id}')">Exit</button></td></tr>`;});
@@ -245,8 +248,8 @@ function renderPositions(ps){
 }
 function renderTrades(ts){
   const tb=$('tradeRows');
-  if(!ts.length){tb.innerHTML='<tr><td colspan="9" class="note">No closed trades today.</td></tr>';return;}
-  tb.innerHTML=ts.map(t=>`<tr><td><b>${t.symbol}</b></td><td>${biasChip(t.bias)}</td><td>${t.option_symbol}</td><td>${t.qty}</td>
+  if(!ts.length){tb.innerHTML='<tr><td colspan="10" class="note">No closed trades today.</td></tr>';return;}
+  tb.innerHTML=ts.map(t=>`<tr><td><b>${t.symbol}</b></td><td>${biasChip(t.bias)}</td><td>${strikeLabel(t)}</td><td>${fmtExp(t.expiry)}</td><td>${t.qty}</td>
     <td>${fmt(t.sell_price)}</td><td>${fmt(t.exit_price)}</td><td>${t.reason}</td>
     <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td><td>${t.entry_day===t.exit_day?'intraday':'overnight'}</td></tr>`).join('');
 }

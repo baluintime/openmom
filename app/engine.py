@@ -208,6 +208,11 @@ class EODEngine:
     async def _sell(self, now: datetime, cand: dict, ct):
         qty = self.cfg.lots * ct.lot_size
         sell_price = ct.ltp
+        # readable contract label if the chain didn't provide a trading symbol
+        symbol = ct.trading_symbol
+        if not symbol or "|" in symbol:
+            symbol = f"{cand['symbol']} {ct.strike:g} {ct.side} {ct.expiry}"
+        ct.trading_symbol = symbol
         gtt_id = None
         if self.cfg.mode == "live":
             try:
