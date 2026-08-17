@@ -22,6 +22,7 @@ app = FastAPI(title="NSE EOD Momentum Options Strategy (Upstox)")
 _INT = {"top_n", "lots", "otm_strikes", "shortlist_size", "universe_limit"}
 _NUM = {"tp_pct", "sl_pct", "min_oi", "max_spread_pct", "capital", "charges_per_trade"}
 _STR = {"mode", "scan_time", "refresh_time", "dispatch_time"}
+_BOOL = {"use_gtt"}
 
 
 @app.on_event("startup")
@@ -154,6 +155,8 @@ async def set_config(body: dict = Body(...)):
             cur[k] = int(v)
         elif k in _NUM:
             cur[k] = float(v)
+        elif k in _BOOL:
+            cur[k] = bool(v)
         elif k in _STR:
             cur[k] = v
     try:

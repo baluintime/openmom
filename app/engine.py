@@ -236,20 +236,28 @@ class EODEngine:
             "ltp": round(sell_price, 2), "status": "open", "gtt_id": gtt_id,
             "oi": ct.oi, "delta": ct.delta, "spread_pct": ct.spread_pct,
         }
-        if self.cfg.mode == "live":
+        if self.cfg.mode == "live" and self.cfg.use_gtt:
             try:
                 pos["gtt_id"] = await self.client.place_gtt(
                     instrument_token=ct.instrument_key, quantity=qty,
                     transaction_type="BUY", target_price=target, stop_price=stop,
                     product="D")
+                self.log("trade", f"{cand['symbol']}: GTT exit attached #{pos['gtt_id']}")
             except UpstoxError as e:
-                self.log("error", f"{cand['symbol']}: GTT attach failed — {e} "
-                                  "(position open WITHOUT exchange exit; will monitor locally)")
+                self.log("error", f"{cand['symbol']}: GTT attach failed — {e}. "
+                                  "The app will place the exit order itself while it is "
+                                  "running (keep it running, or fix/disable GTT).")
+        if self.cfg.mode == "paper":
+            pos["exit_mode"] = "paper (monitored locally)"
+        elif pos["gtt_id"]:
+            pos["exit_mode"] = f"GTT #{pos['gtt_id']}"
+        else:
+            pos["exit_mode"] = "app-managed"
         self.positions.append(pos)
         self._save_positions()
         self.log("trade", f"SOLD {ct.trading_symbol} × {qty} @ ₹{sell_price:.2f} "
                           f"[{self.cfg.mode}] — {cand['symbol']} {cand['bias']} · "
-                          f"target ₹{target:.2f} / stop ₹{stop:.2f}")
+                          f"target ₹{target:.2f} / stop ₹{stop:.2f} · exit: {pos['exit_mode']}")
 
     async def _monitor(self, now: datetime):
         opens = [p for p in self.positions if p["status"] == "open"]
@@ -277,13 +285,41 @@ class EODEngine:
                 continue   # exits only trigger during market hours
             # short option: profit when price falls to target, loss when it rises to stop
             if lp <= p["target"]:
-                self._exit_now(p, lp, "target", now)
+                await self._exit_now(p, lp, "target", now)
             elif lp >= p["stop"]:
-                self._exit_now(p, lp, "stoploss", now)
+                await self._exit_now(p, lp, "stoploss", now)
         self._save_positions()
 
-    def _exit_now(self, p: dict, price: float, reason: str, now: datetime):
-        # live GTT flattens on the exchange; paper simulates the buy-back fill
+    async def _exit_now(self, p: dict, price: float, reason: str, now: datetime):
+        """Close a position. Paper simulates the buy-back at `price`. Live places
+        a real market BUY to flatten — but first verifies the short is still open
+        at the broker (a GTT may have already fired while the app was off), so it
+        never fires a stray order."""
+        if p["mode"] == "live":
+            try:
+                held = await self.client.positions()
+                netq = held.get(p["option_key"])
+            except UpstoxError:
+                netq = None
+            if netq == 0:
+                self.log("trade", f"{p['symbol']}: broker already flat "
+                                  "(exchange GTT closed it) — recording exit")
+                self._close(p, exit_price=price, reason=reason, now=now)
+                return
+            try:
+                if p.get("gtt_id"):
+                    try:
+                        await self.client.cancel_gtt(p["gtt_id"])
+                    except UpstoxError:
+                        pass
+                await self.client.place_order(
+                    instrument_token=p["option_key"], quantity=p["qty"],
+                    transaction_type="BUY", order_type="MARKET", product="D",
+                    tag="eod-exit")
+            except UpstoxError as e:
+                self.log("error", f"Live exit order failed for {p['symbol']}: {e} — "
+                                  "will retry next tick")
+                return
         self._close(p, exit_price=price, reason=reason, now=now)
 
     def _close(self, p: dict, exit_price: float, reason: str, now: datetime):

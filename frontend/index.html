@@ -238,10 +238,11 @@ function renderShortlist(rs_){
 function renderPositions(ps){
   const el=$('positions');
   if(!ps.length){el.innerHTML='<span class="note">No open positions.</span>';return;}
-  let h='<div style="overflow-x:auto"><table><thead><tr><th>Stock</th><th>Bias</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Sell ₹</th><th>LTP</th><th>Target</th><th>Stop</th><th>Unrealized</th><th>Since</th><th></th></tr></thead><tbody>';
+  let h='<div style="overflow-x:auto"><table><thead><tr><th>Stock</th><th>Bias</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Sell ₹</th><th>LTP</th><th>Target</th><th>Stop</th><th>Exit via</th><th>Unrealized</th><th>Since</th><th></th></tr></thead><tbody>';
   ps.forEach(p=>{const cls=(p.unreal_rs||0)>=0?'pos':'neg';
     h+=`<tr><td><b>${p.symbol}</b></td><td>${biasChip(p.bias)}</td><td>${strikeLabel(p)}</td><td>${fmtExp(p.expiry)}</td><td>${p.qty}</td>
       <td>${fmt(p.sell_price)}</td><td>${fmt(p.ltp)}</td><td>${fmt(p.target)}</td><td>${fmt(p.stop)}</td>
+      <td class="note">${p.exit_mode||'—'}</td>
       <td class="${cls}"><b>${rs(p.unreal_rs)}</b></td><td>${p.entry_day} ${p.entry_time}</td>
       <td><button class="small danger" onclick="exitPos('${p.id}')">Exit</button></td></tr>`;});
   h+='</tbody></table></div>';el.innerHTML=h;
@@ -283,10 +284,12 @@ const CFG=[['top_n','Top stocks (N)'],['lots','Lots per stock'],['otm_strikes','
   ['capital','Capital ₹'],['charges_per_trade','Charges/trade ₹']];
 const TIMEK=['scan_time','refresh_time','dispatch_time'];
 function buildCfg(c){
-  $('cfgGrid').innerHTML=CFG.map(([k,l])=>`<label>${l}<input data-k="${k}" type="${TIMEK.includes(k)?'text':'number'}" step="any" value="${c[k]}"></label>`).join('');
+  $('cfgGrid').innerHTML=CFG.map(([k,l])=>`<label>${l}<input data-k="${k}" type="${TIMEK.includes(k)?'text':'number'}" step="any" value="${c[k]}"></label>`).join('')
+    +`<label>Live exchange GTT<br><input data-k="use_gtt" type="checkbox" ${c.use_gtt?'checked':''}> place GTT (overnight backup)</label>`;
 }
 $('btnSaveCfg').onclick=async()=>{const patch={};
-  document.querySelectorAll('#cfgGrid input').forEach(inp=>{patch[inp.dataset.k]=TIMEK.includes(inp.dataset.k)?inp.value:Number(inp.value);});
+  document.querySelectorAll('#cfgGrid input').forEach(inp=>{
+    patch[inp.dataset.k]=inp.type==='checkbox'?inp.checked:(TIMEK.includes(inp.dataset.k)?inp.value:Number(inp.value));});
   try{await post('/api/config',patch);toast('Saved.');$('cfgGrid').innerHTML='';refresh();}catch(e){toast(e.message);}};
 </script>
 </body>

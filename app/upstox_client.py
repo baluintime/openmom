@@ -239,6 +239,17 @@ class UpstoxClient:
     async def order_details(self, order_id: str) -> dict:
         return await self._get(f"{V2}/order/details", params={"order_id": order_id})
 
+    async def positions(self) -> dict[str, int]:
+        """Net quantity per instrument_key from the day's positions (short = negative)."""
+        data = await self._get(f"{V2}/portfolio/short-term-positions")
+        out: dict[str, int] = {}
+        for p in data or []:
+            k = p.get("instrument_token")
+            q = p.get("quantity")
+            if k is not None and q is not None:
+                out[k] = int(q)
+        return out
+
     async def cancel_order(self, order_id: str) -> None:
         resp = await self._http.delete(f"{V3}/order/cancel",
                                        headers=self._headers(), params={"order_id": order_id})

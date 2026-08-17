@@ -65,6 +65,7 @@ class EODConfig:
     universe_limit: int = 0        # cap stocks scanned (0 = all F&O; >0 for speed/testing)
     capital: float = 100000.0
     charges_per_trade: float = 40.0  # round-trip cost per option leg, for net P&L
+    use_gtt: bool = True           # live: also place an exchange GTT as an overnight backup
 
     def validate(self) -> None:
         if self.mode not in ("paper", "live"):
