@@ -258,19 +258,19 @@ class UpstoxClient:
     # ---------------- GTT (exchange-side exits) ----------------
 
     async def place_gtt(self, *, instrument_token: str, quantity: int,
-                        transaction_type: str, target_price: float,
-                        stop_price: float, product: str = "D") -> str:
-        """Create an OCO GTT with a TARGET rule and a STOPLOSS rule on one
-        instrument (Upstox GTT v3). Returns the gtt order id."""
+                        transaction_type: str, trigger_type: str,
+                        trigger_price: float, product: str = "D") -> str:
+        """Create a SINGLE GTT (one ENTRY rule) that fires an order when LTP
+        crosses `trigger_price` in `trigger_type` ("ABOVE"/"BELOW") direction.
+        Two of these (BUY BELOW target + BUY ABOVE stop) form the OCO exit.
+        Returns the gtt order id."""
         payload = {
-            "type": "MULTIPLE", "quantity": quantity, "product": product,
+            "type": "SINGLE", "quantity": quantity, "product": product,
             "instrument_token": instrument_token,
             "transaction_type": transaction_type,
             "rules": [
-                {"strategy": "TARGET", "trigger_type": "IMMEDIATE",
-                 "trigger_price": round(target_price, 2)},
-                {"strategy": "STOPLOSS", "trigger_type": "IMMEDIATE",
-                 "trigger_price": round(stop_price, 2)},
+                {"strategy": "ENTRY", "trigger_type": trigger_type,
+                 "trigger_price": round(trigger_price, 2)},
             ],
         }
         resp = await self._http.post(f"{V3}/order/gtt/place", headers={

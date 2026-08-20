@@ -213,7 +213,6 @@ class EODEngine:
         if not symbol or "|" in symbol:
             symbol = f"{cand['symbol']} {ct.strike:g} {ct.side} {ct.expiry}"
         ct.trading_symbol = symbol
-        gtt_id = None
         if self.cfg.mode == "live":
             try:
                 await self.client.place_order(
@@ -233,24 +232,33 @@ class EODEngine:
             "sell_price": round(sell_price, 2), "target": target, "stop": stop,
             "spot_at_entry": cand["spot"], "strength_at_entry": cand["strength"],
             "entry_time": now.strftime("%H:%M:%S"), "entry_day": now.strftime("%Y-%m-%d"),
-            "ltp": round(sell_price, 2), "status": "open", "gtt_id": gtt_id,
+            "ltp": round(sell_price, 2), "status": "open", "gtt_ids": [],
             "oi": ct.oi, "delta": ct.delta, "spread_pct": ct.spread_pct,
         }
         if self.cfg.mode == "live" and self.cfg.use_gtt:
+            # OCO via two SINGLE GTTs: BUY-below (target) + BUY-above (stop).
+            # Upstox rejects an exit-only MULTIPLE ("one ENTRY strategy required").
             try:
-                pos["gtt_id"] = await self.client.place_gtt(
+                tid = await self.client.place_gtt(
                     instrument_token=ct.instrument_key, quantity=qty,
-                    transaction_type="BUY", target_price=target, stop_price=stop,
-                    product="D")
-                self.log("trade", f"{cand['symbol']}: GTT exit attached #{pos['gtt_id']}")
+                    transaction_type="BUY", trigger_type="BELOW",
+                    trigger_price=target, product="D")
+                sid = await self.client.place_gtt(
+                    instrument_token=ct.instrument_key, quantity=qty,
+                    transaction_type="BUY", trigger_type="ABOVE",
+                    trigger_price=stop, product="D")
+                pos["gtt_ids"] = [tid, sid]
+                self.log("trade", f"{cand['symbol']}: GTT exits attached "
+                                  f"(target #{tid}, stop #{sid})")
             except UpstoxError as e:
+                await self._cancel_gtts(pos)   # roll back a partial pair
                 self.log("error", f"{cand['symbol']}: GTT attach failed — {e}. "
                                   "The app will place the exit order itself while it is "
                                   "running (keep it running, or fix/disable GTT).")
         if self.cfg.mode == "paper":
             pos["exit_mode"] = "paper (monitored locally)"
-        elif pos["gtt_id"]:
-            pos["exit_mode"] = f"GTT #{pos['gtt_id']}"
+        elif pos["gtt_ids"]:
+            pos["exit_mode"] = "GTT (target + stop)"
         else:
             pos["exit_mode"] = "app-managed"
         self.positions.append(pos)
@@ -306,12 +314,8 @@ class EODEngine:
                                   "(exchange GTT closed it) — recording exit")
                 self._close(p, exit_price=price, reason=reason, now=now)
                 return
+            await self._cancel_gtts(p)   # cancel both OCO legs before flattening
             try:
-                if p.get("gtt_id"):
-                    try:
-                        await self.client.cancel_gtt(p["gtt_id"])
-                    except UpstoxError:
-                        pass
                 await self.client.place_order(
                     instrument_token=p["option_key"], quantity=p["qty"],
                     transaction_type="BUY", order_type="MARKET", product="D",
@@ -321,6 +325,18 @@ class EODEngine:
                                   "will retry next tick")
                 return
         self._close(p, exit_price=price, reason=reason, now=now)
+
+    async def _cancel_gtts(self, p: dict):
+        """Cancel every resting GTT leg on a position (supports the legacy
+        single gtt_id field too)."""
+        ids = list(p.get("gtt_ids") or [])
+        if p.get("gtt_id"):
+            ids.append(p["gtt_id"])
+        for gid in ids:
+            try:
+                await self.client.cancel_gtt(gid)
+            except UpstoxError:
+                pass
 
     def _close(self, p: dict, exit_price: float, reason: str, now: datetime):
         p["status"] = "closed"
@@ -358,9 +374,8 @@ class EODEngine:
         except UpstoxError:
             pass
         if self.cfg.mode == "live":
+            await self._cancel_gtts(p)
             try:
-                if p.get("gtt_id"):
-                    await self.client.cancel_gtt(p["gtt_id"])
                 await self.client.place_order(
                     instrument_token=p["option_key"], quantity=p["qty"],
                     transaction_type="BUY", order_type="MARKET", product="D",
