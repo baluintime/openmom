@@ -239,19 +239,20 @@ class EODEngine:
             # OCO via two SINGLE GTTs: BUY-below (target) + BUY-above (stop).
             # Upstox rejects an exit-only MULTIPLE ("one ENTRY strategy required").
             try:
-                tid = await self.client.place_gtt(
+                # store each leg id as it is placed so a partial failure can roll back
+                pos["gtt_ids"].append(await self.client.place_gtt(
                     instrument_token=ct.instrument_key, quantity=qty,
                     transaction_type="BUY", trigger_type="BELOW",
-                    trigger_price=target, product="D")
-                sid = await self.client.place_gtt(
+                    trigger_price=target, product="D"))
+                pos["gtt_ids"].append(await self.client.place_gtt(
                     instrument_token=ct.instrument_key, quantity=qty,
                     transaction_type="BUY", trigger_type="ABOVE",
-                    trigger_price=stop, product="D")
-                pos["gtt_ids"] = [tid, sid]
+                    trigger_price=stop, product="D"))
                 self.log("trade", f"{cand['symbol']}: GTT exits attached "
-                                  f"(target #{tid}, stop #{sid})")
+                                  f"(target #{pos['gtt_ids'][0]}, stop #{pos['gtt_ids'][1]})")
             except UpstoxError as e:
-                await self._cancel_gtts(pos)   # roll back a partial pair
+                await self._cancel_gtts(pos)   # cancel whichever leg was placed
+                pos["gtt_ids"] = []
                 self.log("error", f"{cand['symbol']}: GTT attach failed — {e}. "
                                   "The app will place the exit order itself while it is "
                                   "running (keep it running, or fix/disable GTT).")
