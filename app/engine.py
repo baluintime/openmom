@@ -20,7 +20,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import (DATA_DIR, IST, POSITIONS_FILE, EODConfig, parse_hms)
-from .options import select_itm, select_otm
+from .options import hedge_candidates, select_otm
 from .universe import get_universe, screen
 from .upstox_client import UpstoxClient, UpstoxError
 
@@ -230,43 +230,54 @@ class EODEngine:
         sell_price = ct.ltp
         ct.trading_symbol = self._label(cand["symbol"], ct)
 
-        # optional hedge: BUY an ITM option of the opposite type. Selected up
-        # front. If it can't be placed: skip the trade when require_hedge is on,
-        # otherwise sell the short un-hedged (naked).
+        # optional hedge: BUY an option of the opposite type. Prefer the ITM
+        # strike; if that (or any preferred strike) can't be traded, fall
+        # through progressively liquid strikes. Only go naked if none fills.
         hedge = None
+        opts: list = []
         if self.cfg.hedge_itm:
             buy_side = "CE" if ct.side == "PE" else "PE"
             try:
-                hedge = await select_itm(self.client, self.cfg, equity_key=cand["equity_key"],
-                                         expiry=cand["expiry"], side=buy_side,
-                                         spot=cand["spot"], lot_size=cand["lot_size"])
-                hedge.trading_symbol = self._label(cand["symbol"], hedge)
+                opts = await hedge_candidates(self.client, self.cfg,
+                                              equity_key=cand["equity_key"],
+                                              expiry=cand["expiry"], side=buy_side,
+                                              spot=cand["spot"], lot_size=cand["lot_size"])
             except UpstoxError as e:
+                opts = []
                 if self.cfg.require_hedge:
-                    self.log("dispatch", f"{cand['symbol']}: skipped — ITM hedge "
-                                         f"unavailable ({e}); require-hedge is on.")
+                    self.log("dispatch", f"{cand['symbol']}: skipped — no hedge "
+                                         f"available ({e}); require-hedge is on.")
                     return False
-                self.log("error", f"{cand['symbol']}: ITM hedge unavailable ({e}) — "
+                self.log("error", f"{cand['symbol']}: no hedge available ({e}) — "
                                   "selling un-hedged (naked).")
 
         if self.cfg.mode == "live":
-            hedge_qty = self.cfg.lots * hedge.lot_size if hedge else 0
-            # 1) buy the protective hedge FIRST (when available)
-            if hedge:
-                try:
-                    await self.client.place_order(
-                        instrument_token=hedge.instrument_key, quantity=hedge_qty,
-                        transaction_type="BUY", order_type="MARKET",
-                        product="D", tag="eod-hedge")
-                except UpstoxError as e:
+            # 1) buy a hedge FIRST — try candidates until one fills
+            if opts:
+                last_err = None
+                for i, hc in enumerate(opts):
+                    try:
+                        await self.client.place_order(
+                            instrument_token=hc.instrument_key,
+                            quantity=self.cfg.lots * hc.lot_size,
+                            transaction_type="BUY", order_type="MARKET",
+                            product="D", tag="eod-hedge")
+                        hedge = hc
+                        moneyness = "ITM" if i == 0 else "fallback"
+                        self.log("trade", f"{cand['symbol']}: hedge BUY filled "
+                                          f"{self._label(cand['symbol'], hc)} ({moneyness})")
+                        break
+                    except UpstoxError as e:
+                        last_err = e
+                        continue
+                if hedge is None:
                     if self.cfg.require_hedge:
-                        self.log("dispatch", f"{cand['symbol']}: skipped — hedge BUY "
-                                             f"failed ({e}); require-hedge is on.")
+                        self.log("dispatch", f"{cand['symbol']}: skipped — no hedge "
+                                             f"strike filled ({last_err}); require-hedge is on.")
                         return False
-                    self.log("error", f"{cand['symbol']}: hedge BUY failed ({e}) — "
-                                      "selling un-hedged (naked).")
-                    hedge = None
-            # 2) sell the short leg
+                    self.log("error", f"{cand['symbol']}: no hedge strike filled "
+                                      f"({last_err}) — selling un-hedged (naked).")
+            # 2) sell the short leg (with or without a hedge)
             try:
                 await self.client.place_order(
                     instrument_token=ct.instrument_key, quantity=qty,
@@ -277,7 +288,8 @@ class EODEngine:
                 if hedge:   # roll back the hedge we just bought
                     try:
                         await self.client.place_order(
-                            instrument_token=hedge.instrument_key, quantity=hedge_qty,
+                            instrument_token=hedge.instrument_key,
+                            quantity=self.cfg.lots * hedge.lot_size,
                             transaction_type="SELL", order_type="MARKET",
                             product="D", tag="eod-hedge-rollback")
                         self.log("trade", f"{cand['symbol']}: rolled back the hedge "
@@ -286,6 +298,10 @@ class EODEngine:
                         self.log("error", f"{cand['symbol']}: hedge rollback failed — {e2}. "
                                           f"You hold a long {hedge.side}; close it manually.")
                 return False
+        elif opts:
+            hedge = opts[0]   # paper: use the best (ITM) candidate
+        if hedge:
+            hedge.trading_symbol = self._label(cand["symbol"], hedge)
         target = self._tick(sell_price * (1 - self.cfg.tp_pct / 100))
         stop = self._tick(sell_price * (1 + self.cfg.sl_pct / 100))
         pos = {
