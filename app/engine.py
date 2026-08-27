@@ -20,7 +20,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .config import (DATA_DIR, IST, POSITIONS_FILE, EODConfig, parse_hms)
-from .options import select_otm
+from .options import select_itm, select_otm
 from .universe import get_universe, screen
 from .upstox_client import UpstoxClient, UpstoxError
 
@@ -205,14 +205,31 @@ class EODEngine:
                 continue
             await self._sell(now, c, ct)
 
+    def _label(self, cand_symbol: str, ct) -> str:
+        sym = ct.trading_symbol
+        if not sym or "|" in sym:
+            sym = f"{cand_symbol} {ct.strike:g} {ct.side} {ct.expiry}"
+        return sym
+
     async def _sell(self, now: datetime, cand: dict, ct):
         qty = self.cfg.lots * ct.lot_size
         sell_price = ct.ltp
-        # readable contract label if the chain didn't provide a trading symbol
-        symbol = ct.trading_symbol
-        if not symbol or "|" in symbol:
-            symbol = f"{cand['symbol']} {ct.strike:g} {ct.side} {ct.expiry}"
-        ct.trading_symbol = symbol
+        ct.trading_symbol = self._label(cand["symbol"], ct)
+
+        # optional hedge: BUY an ITM option of the opposite type
+        hedge = None
+        if self.cfg.hedge_itm:
+            buy_side = "CE" if ct.side == "PE" else "PE"
+            try:
+                hc = await select_itm(self.client, self.cfg, equity_key=cand["equity_key"],
+                                      expiry=cand["expiry"], side=buy_side,
+                                      spot=cand["spot"], lot_size=cand["lot_size"])
+                hc.trading_symbol = self._label(cand["symbol"], hc)
+                hedge = hc
+            except UpstoxError as e:
+                self.log("error", f"{cand['symbol']}: ITM hedge selection failed — {e}. "
+                                  "Selling the option un-hedged.")
+
         if self.cfg.mode == "live":
             try:
                 await self.client.place_order(
@@ -222,6 +239,17 @@ class EODEngine:
             except UpstoxError as e:
                 self.log("error", f"{cand['symbol']}: live SELL failed — {e}")
                 return
+            if hedge:
+                try:
+                    await self.client.place_order(
+                        instrument_token=hedge.instrument_key,
+                        quantity=self.cfg.lots * hedge.lot_size,
+                        transaction_type="BUY", order_type="MARKET",
+                        product="D", tag="eod-hedge")
+                except UpstoxError as e:
+                    self.log("error", f"{cand['symbol']}: hedge BUY failed — {e}. "
+                                      "Short leg is live and un-hedged.")
+                    hedge = None
         target = round(sell_price * (1 - self.cfg.tp_pct / 100), 2)
         stop = round(sell_price * (1 + self.cfg.sl_pct / 100), 2)
         pos = {
@@ -234,6 +262,13 @@ class EODEngine:
             "entry_time": now.strftime("%H:%M:%S"), "entry_day": now.strftime("%Y-%m-%d"),
             "ltp": round(sell_price, 2), "status": "open", "gtt_ids": [],
             "oi": ct.oi, "delta": ct.delta, "spread_pct": ct.spread_pct,
+            "hedge": ({
+                "side": hedge.side, "option_key": hedge.instrument_key,
+                "option_symbol": hedge.trading_symbol, "strike": hedge.strike,
+                "expiry": hedge.expiry, "lot_size": hedge.lot_size,
+                "qty": self.cfg.lots * hedge.lot_size,
+                "buy_price": round(hedge.ltp, 2), "ltp": round(hedge.ltp, 2),
+            } if hedge else None),
         }
         if self.cfg.mode == "live" and self.cfg.use_gtt:
             # OCO via two SINGLE GTTs: BUY-below (target) + BUY-above (stop).
@@ -264,9 +299,12 @@ class EODEngine:
             pos["exit_mode"] = "app-managed"
         self.positions.append(pos)
         self._save_positions()
+        hedge_txt = (f" + BOUGHT {pos['hedge']['option_symbol']} @ ₹{pos['hedge']['buy_price']:.2f} (ITM hedge)"
+                     if pos["hedge"] else "")
         self.log("trade", f"SOLD {ct.trading_symbol} × {qty} @ ₹{sell_price:.2f} "
                           f"[{self.cfg.mode}] — {cand['symbol']} {cand['bias']} · "
-                          f"target ₹{target:.2f} / stop ₹{stop:.2f} · exit: {pos['exit_mode']}")
+                          f"target ₹{target:.2f} / stop ₹{stop:.2f} · exit: {pos['exit_mode']}"
+                          + hedge_txt)
 
     async def _monitor(self, now: datetime):
         opens = [p for p in self.positions if p["status"] == "open"]
@@ -280,12 +318,20 @@ class EODEngine:
         opens = [p for p in self.positions if p["status"] == "open"]
         if not opens:
             return
-        keys = list({p["option_key"] for p in opens})
+        keys = set()
+        for p in opens:
+            keys.add(p["option_key"])
+            if p.get("hedge"):
+                keys.add(p["hedge"]["option_key"])
         try:
-            ltp_map = await self.client.ltp(keys)
+            ltp_map = await self.client.ltp(list(keys))
         except UpstoxError:
             return
         for p in opens:
+            if p.get("hedge"):
+                hlp = ltp_map.get(p["hedge"]["option_key"])
+                if hlp is not None:
+                    p["hedge"]["ltp"] = round(hlp, 2)
             lp = ltp_map.get(p["option_key"])
             if lp is None:
                 continue
@@ -313,6 +359,7 @@ class EODEngine:
             if netq == 0:
                 self.log("trade", f"{p['symbol']}: broker already flat "
                                   "(exchange GTT closed it) — recording exit")
+                await self._close_hedge_live(p)
                 self._close(p, exit_price=price, reason=reason, now=now)
                 return
             await self._cancel_gtts(p)   # cancel both OCO legs before flattening
@@ -325,7 +372,22 @@ class EODEngine:
                 self.log("error", f"Live exit order failed for {p['symbol']}: {e} — "
                                   "will retry next tick")
                 return
+            await self._close_hedge_live(p)   # sell the ITM hedge alongside
         self._close(p, exit_price=price, reason=reason, now=now)
+
+    async def _close_hedge_live(self, p: dict):
+        """Live only: sell the bought ITM hedge leg to flatten it with the short."""
+        h = p.get("hedge")
+        if not h or h.get("closed"):
+            return
+        try:
+            await self.client.place_order(
+                instrument_token=h["option_key"], quantity=h["qty"],
+                transaction_type="SELL", order_type="MARKET", product="D",
+                tag="eod-hedge-exit")
+            h["closed"] = True
+        except UpstoxError as e:
+            self.log("error", f"{p['symbol']}: hedge exit SELL failed — {e}")
 
     async def _cancel_gtts(self, p: dict):
         """Cancel every resting GTT leg on a position (supports the legacy
@@ -344,24 +406,42 @@ class EODEngine:
         p["exit_price"] = round(exit_price, 2)
         p["exit_reason"] = reason
         p["exit_time"] = now.strftime("%H:%M:%S")
-        pnl = (p["sell_price"] - exit_price) * p["qty"]      # short: credit - buyback
-        charges = self.cfg.charges_per_trade
+        short_pnl = (p["sell_price"] - exit_price) * p["qty"]   # short: credit - buyback
+        legs = 1
+        h = p.get("hedge")
+        hedge_pnl = 0.0
+        hedge_fields = {}
+        if h:
+            legs = 2
+            h_exit = 0.0 if reason == "expired" else (h.get("ltp") or h["buy_price"])
+            h["exit_price"] = round(h_exit, 2)
+            hedge_pnl = (h_exit - h["buy_price"]) * h["qty"]   # long: exit - entry
+            hedge_fields = {
+                "hedge_symbol": h["option_symbol"], "hedge_side": h["side"],
+                "hedge_strike": h["strike"], "hedge_qty": h["qty"],
+                "buy_price": h["buy_price"], "hedge_exit": round(h_exit, 2),
+                "hedge_net_rs": round(hedge_pnl, 2),
+            }
+        gross = short_pnl + hedge_pnl
+        charges = self.cfg.charges_per_trade * legs
         trade = {
             "entry_day": p["entry_day"], "exit_day": now.strftime("%Y-%m-%d"),
             "symbol": p["symbol"], "bias": p["bias"], "side": p["side"],
             "option_symbol": p["option_symbol"], "strike": p["strike"],
             "expiry": p["expiry"], "qty": p["qty"], "mode": p["mode"],
             "sell_price": p["sell_price"], "exit_price": round(exit_price, 2),
+            "short_net_rs": round(short_pnl, 2),
             "spot_at_entry": p.get("spot_at_entry"),
             "entry_time": p["entry_time"], "exit_time": p["exit_time"],
             "reason": reason, "points": round(p["sell_price"] - exit_price, 2),
-            "gross_rs": round(pnl, 2), "charges_rs": round(charges, 2),
-            "net_rs": round(pnl - charges, 2),
+            "gross_rs": round(gross, 2), "charges_rs": round(charges, 2),
+            "net_rs": round(gross - charges, 2), **hedge_fields,
         }
         self._record_trade(trade)
         self._save_positions()
-        self.log("trade", f"CLOSED {p['option_symbol']} @ ₹{exit_price:.2f} ({reason}) "
-                          f"— net ₹{trade['net_rs']:+,.2f}")
+        self.log("trade", f"CLOSED {p['option_symbol']} @ ₹{exit_price:.2f} ({reason})"
+                          + (f" + hedge {h['option_symbol']} @ ₹{h['exit_price']:.2f}" if h else "")
+                          + f" — net ₹{trade['net_rs']:+,.2f}")
 
     async def manual_exit(self, pos_id: str) -> bool:
         now = datetime.now(TZ)
@@ -370,8 +450,11 @@ class EODEngine:
             return False
         price = p.get("ltp") or p["sell_price"]
         try:
-            m = await self.client.ltp([p["option_key"]])
+            keys = [p["option_key"]] + ([p["hedge"]["option_key"]] if p.get("hedge") else [])
+            m = await self.client.ltp(keys)
             price = m.get(p["option_key"], price)
+            if p.get("hedge") and m.get(p["hedge"]["option_key"]) is not None:
+                p["hedge"]["ltp"] = round(m[p["hedge"]["option_key"]], 2)
         except UpstoxError:
             pass
         if self.cfg.mode == "live":
@@ -384,6 +467,7 @@ class EODEngine:
             except UpstoxError as e:
                 self.log("error", f"Manual exit failed for {p['symbol']}: {e}")
                 return False
+            await self._close_hedge_live(p)
         self._close(p, exit_price=price, reason="manual", now=now)
         return True
 
@@ -393,7 +477,10 @@ class EODEngine:
         opens = [p for p in self.positions if p.get("status") == "open"]
         for p in opens:
             sell = p.get("sell_price") or 0.0
-            up = (sell - (p.get("ltp") or sell)) * (p.get("qty") or 0)
+            up = (sell - (p.get("ltp") or sell)) * (p.get("qty") or 0)   # short leg
+            h = p.get("hedge")
+            if h:
+                up += ((h.get("ltp") or h["buy_price"]) - h["buy_price"]) * h["qty"]  # long leg
             p["unreal_rs"] = round(up, 2)
         return {
             "now_ist": now.strftime("%Y-%m-%d %H:%M:%S"),

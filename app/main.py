@@ -19,10 +19,10 @@ engine = EODEngine(client, load_config())
 
 app = FastAPI(title="NSE EOD Momentum Options Strategy (Upstox)")
 
-_INT = {"top_n", "lots", "otm_strikes", "shortlist_size", "universe_limit"}
+_INT = {"top_n", "lots", "otm_strikes", "shortlist_size", "universe_limit", "hedge_itm_strikes"}
 _NUM = {"tp_pct", "sl_pct", "min_oi", "max_spread_pct", "capital", "charges_per_trade"}
 _STR = {"mode", "scan_time", "refresh_time", "dispatch_time"}
-_BOOL = {"use_gtt"}
+_BOOL = {"use_gtt", "hedge_itm"}
 
 
 @app.on_event("startup")
@@ -180,7 +180,10 @@ EXPORT_COLUMNS = [
     ("symbol", "Stock"), ("bias", "Bias"), ("side", "Option"),
     ("option_symbol", "Contract"), ("strike", "Strike"), ("expiry", "Expiry"),
     ("qty", "Qty"), ("spot_at_entry", "Spot @ Entry"),
-    ("sell_price", "Sell ₹"), ("exit_price", "Exit ₹"), ("points", "Points"),
+    ("sell_price", "Sell ₹"), ("exit_price", "Exit ₹"), ("short_net_rs", "Short Net ₹"),
+    ("hedge_symbol", "Hedge (ITM)"), ("hedge_side", "Hedge Side"),
+    ("hedge_strike", "Hedge Strike"), ("buy_price", "Hedge Buy ₹"),
+    ("hedge_exit", "Hedge Exit ₹"), ("hedge_net_rs", "Hedge Net ₹"),
     ("gross_rs", "Gross ₹"), ("charges_rs", "Charges ₹"), ("net_rs", "Net ₹"),
     ("entry_time", "Entry Time"), ("exit_time", "Exit Time"), ("reason", "Exit Reason"),
 ]

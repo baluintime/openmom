@@ -137,7 +137,7 @@
       </div>
     </div>
     <div style="overflow-x:auto;margin-top:8px"><table><thead><tr>
-      <th>Stock</th><th>Bias</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Sell ₹</th><th>Exit ₹</th><th>Reason</th><th>Net ₹</th><th>Held</th>
+      <th>Stock</th><th>Bias</th><th>Sold</th><th>Hedge</th><th>Qty</th><th>Sell ₹</th><th>Exit ₹</th><th>Reason</th><th>Net ₹</th><th>Held</th>
     </tr></thead><tbody id="tradeRows"><tr><td colspan="10" class="note">No closed trades today.</td></tr></tbody></table></div>
   </section>
 
@@ -196,7 +196,9 @@ function render(){
   $('modeBadge').textContent=c.mode.toUpperCase();$('modeBadge').className='badge '+(c.mode==='live'?'live':'paper');
   $('runBadge').textContent=s.running?'ARMED':'DISARMED';$('runBadge').className='badge '+(s.running?'on':'off');
   document.querySelectorAll('input[name=mode]').forEach(r=>r.checked=r.value===c.mode);
-  $('strategyLine').textContent=`${c.mode.toUpperCase()} · top ${c.top_n} stock(s) · ${c.lots} lot(s) · sell OTM within ${c.otm_strikes} strikes · TP ${c.tp_pct}% / SL ${c.sl_pct}% · scan ${c.scan_time} · dispatch ${c.dispatch_time}`;
+  $('strategyLine').textContent=`${c.mode.toUpperCase()} · top ${c.top_n} stock(s) · ${c.lots} lot(s) · sell OTM within ${c.otm_strikes} strikes`
+    +(c.hedge_itm?` + buy ITM hedge (${c.hedge_itm_strikes} deep)`:'')
+    +` · TP ${c.tp_pct}% / SL ${c.sl_pct}% · scan ${c.scan_time} · dispatch ${c.dispatch_time}`;
   // tiles
   const opens=s.positions||[];
   $('tOpen').textContent=opens.length;
@@ -238,11 +240,12 @@ function renderShortlist(rs_){
 function renderPositions(ps){
   const el=$('positions');
   if(!ps.length){el.innerHTML='<span class="note">No open positions.</span>';return;}
-  let h='<div style="overflow-x:auto"><table><thead><tr><th>Stock</th><th>Bias</th><th>Strike</th><th>Expiry</th><th>Qty</th><th>Sell ₹</th><th>LTP</th><th>Target</th><th>Stop</th><th>Exit via</th><th>Unrealized</th><th>Since</th><th></th></tr></thead><tbody>';
+  let h='<div style="overflow-x:auto"><table><thead><tr><th>Stock</th><th>Bias</th><th>Sold (OTM)</th><th>Expiry</th><th>Qty</th><th>Sell ₹</th><th>LTP</th><th>Target</th><th>Stop</th><th>Hedge (ITM buy)</th><th>Exit via</th><th>Unrealized</th><th>Since</th><th></th></tr></thead><tbody>';
   ps.forEach(p=>{const cls=(p.unreal_rs||0)>=0?'pos':'neg';
+    const hd=p.hedge?`${fmt(p.hedge.strike,0)} ${p.hedge.side} @ ${fmt(p.hedge.buy_price)}→${fmt(p.hedge.ltp)}`:'—';
     h+=`<tr><td><b>${p.symbol}</b></td><td>${biasChip(p.bias)}</td><td>${strikeLabel(p)}</td><td>${fmtExp(p.expiry)}</td><td>${p.qty}</td>
       <td>${fmt(p.sell_price)}</td><td>${fmt(p.ltp)}</td><td>${fmt(p.target)}</td><td>${fmt(p.stop)}</td>
-      <td class="note">${p.exit_mode||'—'}</td>
+      <td class="note">${hd}</td><td class="note">${p.exit_mode||'—'}</td>
       <td class="${cls}"><b>${rs(p.unreal_rs)}</b></td><td>${p.entry_day} ${p.entry_time}</td>
       <td><button class="small danger" onclick="exitPos('${p.id}')">Exit</button></td></tr>`;});
   h+='</tbody></table></div>';el.innerHTML=h;
@@ -250,7 +253,8 @@ function renderPositions(ps){
 function renderTrades(ts){
   const tb=$('tradeRows');
   if(!ts.length){tb.innerHTML='<tr><td colspan="10" class="note">No closed trades today.</td></tr>';return;}
-  tb.innerHTML=ts.map(t=>`<tr><td><b>${t.symbol}</b></td><td>${biasChip(t.bias)}</td><td>${strikeLabel(t)}</td><td>${fmtExp(t.expiry)}</td><td>${t.qty}</td>
+  tb.innerHTML=ts.map(t=>`<tr><td><b>${t.symbol}</b></td><td>${biasChip(t.bias)}</td><td>${strikeLabel(t)}</td>
+    <td class="note">${t.hedge_symbol?`${fmt(t.hedge_strike,0)} ${t.hedge_side}`:'—'}</td><td>${t.qty}</td>
     <td>${fmt(t.sell_price)}</td><td>${fmt(t.exit_price)}</td><td>${t.reason}</td>
     <td class="${t.net_rs>=0?'pos':'neg'}"><b>${rs(t.net_rs)}</b></td><td>${t.entry_day===t.exit_day?'intraday':'overnight'}</td></tr>`).join('');
 }
@@ -278,6 +282,7 @@ $('btnLiveOk').onclick=async()=>{if($('liveConfirm').value.trim()!=='LIVE'){toas
 async function saveCfg(patch){try{await post('/api/config',patch);refresh();}catch(e){toast(e.message);refresh();}}
 
 const CFG=[['top_n','Top stocks (N)'],['lots','Lots per stock'],['otm_strikes','OTM strike range'],
+  ['hedge_itm_strikes','Hedge ITM depth (strikes)'],
   ['tp_pct','Take-profit %'],['sl_pct','Stop-loss %'],['shortlist_size','Shortlist size'],
   ['min_oi','Min OI (0=off)'],['max_spread_pct','Max spread % (0=off)'],['universe_limit','Universe limit (0=all)'],
   ['scan_time','Scan time'],['refresh_time','Refresh time'],['dispatch_time','Dispatch time'],
@@ -285,6 +290,7 @@ const CFG=[['top_n','Top stocks (N)'],['lots','Lots per stock'],['otm_strikes','
 const TIMEK=['scan_time','refresh_time','dispatch_time'];
 function buildCfg(c){
   $('cfgGrid').innerHTML=CFG.map(([k,l])=>`<label>${l}<input data-k="${k}" type="${TIMEK.includes(k)?'text':'number'}" step="any" value="${c[k]}"></label>`).join('')
+    +`<label>Buy ITM hedge<br><input data-k="hedge_itm" type="checkbox" ${c.hedge_itm?'checked':''}> sell put→buy ITM call (&amp; vice-versa)</label>`
     +`<label>Live exchange GTT<br><input data-k="use_gtt" type="checkbox" ${c.use_gtt?'checked':''}> place GTT (overnight backup)</label>`;
 }
 $('btnSaveCfg').onclick=async()=>{const patch={};

@@ -54,6 +54,8 @@ class EODConfig:
     top_n: int = 1                 # how many top-ranked stocks to trade
     lots: int = 1                  # option lots per stock
     otm_strikes: int = 5           # max OTM distance from spot (strikes)
+    hedge_itm: bool = True          # also BUY an ITM option of the opposite type
+    hedge_itm_strikes: int = 1      # how deep ITM to buy (strikes from spot)
     tp_pct: float = 5.0            # take-profit: option price drops this % (seller gain)
     sl_pct: float = 20.0           # stop-loss: option price rises this % (seller loss)
     scan_time: str = "15:15"       # initial stock scan (IST)
@@ -70,7 +72,7 @@ class EODConfig:
     def validate(self) -> None:
         if self.mode not in ("paper", "live"):
             raise ValueError("mode must be 'paper' or 'live'")
-        for k in ("top_n", "lots", "otm_strikes", "shortlist_size"):
+        for k in ("top_n", "lots", "otm_strikes", "shortlist_size", "hedge_itm_strikes"):
             if int(getattr(self, k)) < 1:
                 raise ValueError(f"{k} must be >= 1")
         if self.tp_pct <= 0 or self.tp_pct >= 100:
