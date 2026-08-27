@@ -231,8 +231,8 @@ class EODEngine:
         ct.trading_symbol = self._label(cand["symbol"], ct)
 
         # optional hedge: BUY an ITM option of the opposite type. Selected up
-        # front — if it's required but unavailable we skip the trade rather
-        # than leave a naked short.
+        # front. If it can't be placed: skip the trade when require_hedge is on,
+        # otherwise sell the short un-hedged (naked).
         hedge = None
         if self.cfg.hedge_itm:
             buy_side = "CE" if ct.side == "PE" else "PE"
@@ -242,13 +242,16 @@ class EODEngine:
                                          spot=cand["spot"], lot_size=cand["lot_size"])
                 hedge.trading_symbol = self._label(cand["symbol"], hedge)
             except UpstoxError as e:
-                self.log("dispatch", f"{cand['symbol']}: skipped — ITM hedge unavailable "
-                                     f"({e}); not selling un-hedged.")
-                return False
+                if self.cfg.require_hedge:
+                    self.log("dispatch", f"{cand['symbol']}: skipped — ITM hedge "
+                                         f"unavailable ({e}); require-hedge is on.")
+                    return False
+                self.log("error", f"{cand['symbol']}: ITM hedge unavailable ({e}) — "
+                                  "selling un-hedged (naked).")
 
         if self.cfg.mode == "live":
             hedge_qty = self.cfg.lots * hedge.lot_size if hedge else 0
-            # 1) buy the protective hedge FIRST — never hold a naked short
+            # 1) buy the protective hedge FIRST (when available)
             if hedge:
                 try:
                     await self.client.place_order(
@@ -256,9 +259,13 @@ class EODEngine:
                         transaction_type="BUY", order_type="MARKET",
                         product="D", tag="eod-hedge")
                 except UpstoxError as e:
-                    self.log("dispatch", f"{cand['symbol']}: skipped — hedge BUY failed "
-                                         f"({e}); not selling un-hedged.")
-                    return False
+                    if self.cfg.require_hedge:
+                        self.log("dispatch", f"{cand['symbol']}: skipped — hedge BUY "
+                                             f"failed ({e}); require-hedge is on.")
+                        return False
+                    self.log("error", f"{cand['symbol']}: hedge BUY failed ({e}) — "
+                                      "selling un-hedged (naked).")
+                    hedge = None
             # 2) sell the short leg
             try:
                 await self.client.place_order(

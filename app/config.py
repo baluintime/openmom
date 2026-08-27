@@ -56,6 +56,7 @@ class EODConfig:
     otm_strikes: int = 5           # max OTM distance from spot (strikes)
     hedge_itm: bool = True          # also BUY an ITM option of the opposite type
     hedge_itm_strikes: int = 1      # how deep ITM to buy (strikes from spot)
+    require_hedge: bool = False     # if the hedge can't be placed: skip (True) or sell naked (False)
     tp_pct: float = 5.0            # take-profit: option price drops this % (seller gain)
     sl_pct: float = 20.0           # stop-loss: option price rises this % (seller loss)
     tick_size: float = 0.05        # exchange price tick — target/stop rounded to it

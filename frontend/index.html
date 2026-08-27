@@ -291,6 +291,7 @@ const TIMEK=['scan_time','refresh_time','dispatch_time'];
 function buildCfg(c){
   $('cfgGrid').innerHTML=CFG.map(([k,l])=>`<label>${l}<input data-k="${k}" type="${TIMEK.includes(k)?'text':'number'}" step="any" value="${c[k]}"></label>`).join('')
     +`<label>Buy ITM hedge<br><input data-k="hedge_itm" type="checkbox" ${c.hedge_itm?'checked':''}> sell put→buy ITM call (&amp; vice-versa)</label>`
+    +`<label>Require hedge<br><input data-k="require_hedge" type="checkbox" ${c.require_hedge?'checked':''}> skip if hedge fails (else sell naked)</label>`
     +`<label>Live exchange GTT<br><input data-k="use_gtt" type="checkbox" ${c.use_gtt?'checked':''}> place GTT (overnight backup)</label>`;
 }
 $('btnSaveCfg').onclick=async()=>{const patch={};
