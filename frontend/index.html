@@ -283,7 +283,7 @@ async function saveCfg(patch){try{await post('/api/config',patch);refresh();}cat
 
 const CFG=[['top_n','Top stocks (N)'],['lots','Lots per stock'],['otm_strikes','OTM strike range'],
   ['hedge_itm_strikes','Hedge ITM depth (strikes)'],
-  ['tp_pct','Take-profit %'],['sl_pct','Stop-loss %'],['shortlist_size','Shortlist size'],
+  ['tp_pct','Take-profit %'],['sl_pct','Stop-loss %'],['tick_size','Price tick (₹)'],['shortlist_size','Shortlist size'],
   ['min_oi','Min OI (0=off)'],['max_spread_pct','Max spread % (0=off)'],['universe_limit','Universe limit (0=all)'],
   ['scan_time','Scan time'],['refresh_time','Refresh time'],['dispatch_time','Dispatch time'],
   ['capital','Capital ₹'],['charges_per_trade','Charges/trade ₹']];

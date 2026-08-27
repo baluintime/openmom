@@ -58,6 +58,7 @@ class EODConfig:
     hedge_itm_strikes: int = 1      # how deep ITM to buy (strikes from spot)
     tp_pct: float = 5.0            # take-profit: option price drops this % (seller gain)
     sl_pct: float = 20.0           # stop-loss: option price rises this % (seller loss)
+    tick_size: float = 0.05        # exchange price tick — target/stop rounded to it
     scan_time: str = "15:15"       # initial stock scan (IST)
     refresh_time: str = "15:24:50" # pre-exec rescan of the shortlist
     dispatch_time: str = "15:25"   # place the sell orders + exits

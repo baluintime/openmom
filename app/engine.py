@@ -39,6 +39,7 @@ class EODEngine:
         self.trades: list[dict] = self._load_today_trades()
         self.scan_result: list[dict] = []       # shortlist from the 3:15 scan
         self.candidates: list[dict] = []         # definitive top-N from 3:24:50
+        self._ranked: list[dict] = []            # full ranked pool (dispatch fallback)
         self.universe_count = 0
         self.last_scan_at: str | None = None
         self.phase = {"scan": None, "refresh": None, "dispatch": None}  # date guards
@@ -184,26 +185,39 @@ class EODEngine:
                            lot_size=r["lot_size"], expiry=r["expiry"])
                      for r in self.scan_result]
         quotes = await self.client.full_quote([s.equity_key for s in shortlist])
-        ranked = screen(shortlist, quotes)
-        self.candidates = ranked[:self.cfg.top_n]
+        self._ranked = screen(shortlist, quotes)     # full ranked pool for fallback
+        self.candidates = self._ranked[:self.cfg.top_n]
         self.log("refresh", "Re-scan complete — definitive picks: "
                  + ", ".join(f"{c['symbol']} ({c['bias']}, sell {c['side']}, "
                              f"{c['strength']:.2f}%)" for c in self.candidates))
 
     async def _dispatch(self, now: datetime):
         held = {p["symbol"] for p in self.positions if p["status"] == "open"}
-        for c in self.candidates[:self.cfg.top_n]:
+        opened = 0
+        # walk the ranked pool; if a top pick can't be traded (illiquid option,
+        # un-hedgeable, selection error), fall through to the next-ranked stock
+        for c in (getattr(self, "_ranked", None) or self.candidates):
+            if opened >= self.cfg.top_n:
+                break
             if c["symbol"] in held:
-                self.log("dispatch", f"{c['symbol']}: already holding a position — skipped")
                 continue
             try:
                 ct = await select_otm(self.client, self.cfg, equity_key=c["equity_key"],
                                       expiry=c["expiry"], side=c["side"],
                                       spot=c["spot"], lot_size=c["lot_size"])
             except UpstoxError as e:
-                self.log("error", f"{c['symbol']}: option selection failed — {e}")
+                self.log("dispatch", f"{c['symbol']}: skipped — option selection failed ({e})")
                 continue
-            await self._sell(now, c, ct)
+            if await self._sell(now, c, ct):
+                opened += 1
+        if opened < self.cfg.top_n:
+            self.log("dispatch", f"Opened {opened}/{self.cfg.top_n} positions "
+                                 "(remaining picks were un-tradeable/un-hedgeable).")
+
+    def _tick(self, price: float) -> float:
+        """Round to the exchange tick (₹0.05) — required for GTT trigger prices."""
+        t = self.cfg.tick_size or 0.05
+        return round(round(price / t) * t, 2)
 
     def _label(self, cand_symbol: str, ct) -> str:
         sym = ct.trading_symbol
@@ -216,21 +230,36 @@ class EODEngine:
         sell_price = ct.ltp
         ct.trading_symbol = self._label(cand["symbol"], ct)
 
-        # optional hedge: BUY an ITM option of the opposite type
+        # optional hedge: BUY an ITM option of the opposite type. Selected up
+        # front — if it's required but unavailable we skip the trade rather
+        # than leave a naked short.
         hedge = None
         if self.cfg.hedge_itm:
             buy_side = "CE" if ct.side == "PE" else "PE"
             try:
-                hc = await select_itm(self.client, self.cfg, equity_key=cand["equity_key"],
-                                      expiry=cand["expiry"], side=buy_side,
-                                      spot=cand["spot"], lot_size=cand["lot_size"])
-                hc.trading_symbol = self._label(cand["symbol"], hc)
-                hedge = hc
+                hedge = await select_itm(self.client, self.cfg, equity_key=cand["equity_key"],
+                                         expiry=cand["expiry"], side=buy_side,
+                                         spot=cand["spot"], lot_size=cand["lot_size"])
+                hedge.trading_symbol = self._label(cand["symbol"], hedge)
             except UpstoxError as e:
-                self.log("error", f"{cand['symbol']}: ITM hedge selection failed — {e}. "
-                                  "Selling the option un-hedged.")
+                self.log("dispatch", f"{cand['symbol']}: skipped — ITM hedge unavailable "
+                                     f"({e}); not selling un-hedged.")
+                return False
 
         if self.cfg.mode == "live":
+            hedge_qty = self.cfg.lots * hedge.lot_size if hedge else 0
+            # 1) buy the protective hedge FIRST — never hold a naked short
+            if hedge:
+                try:
+                    await self.client.place_order(
+                        instrument_token=hedge.instrument_key, quantity=hedge_qty,
+                        transaction_type="BUY", order_type="MARKET",
+                        product="D", tag="eod-hedge")
+                except UpstoxError as e:
+                    self.log("dispatch", f"{cand['symbol']}: skipped — hedge BUY failed "
+                                         f"({e}); not selling un-hedged.")
+                    return False
+            # 2) sell the short leg
             try:
                 await self.client.place_order(
                     instrument_token=ct.instrument_key, quantity=qty,
@@ -238,20 +267,20 @@ class EODEngine:
                     product="D", tag="eod-momentum")
             except UpstoxError as e:
                 self.log("error", f"{cand['symbol']}: live SELL failed — {e}")
-                return
-            if hedge:
-                try:
-                    await self.client.place_order(
-                        instrument_token=hedge.instrument_key,
-                        quantity=self.cfg.lots * hedge.lot_size,
-                        transaction_type="BUY", order_type="MARKET",
-                        product="D", tag="eod-hedge")
-                except UpstoxError as e:
-                    self.log("error", f"{cand['symbol']}: hedge BUY failed — {e}. "
-                                      "Short leg is live and un-hedged.")
-                    hedge = None
-        target = round(sell_price * (1 - self.cfg.tp_pct / 100), 2)
-        stop = round(sell_price * (1 + self.cfg.sl_pct / 100), 2)
+                if hedge:   # roll back the hedge we just bought
+                    try:
+                        await self.client.place_order(
+                            instrument_token=hedge.instrument_key, quantity=hedge_qty,
+                            transaction_type="SELL", order_type="MARKET",
+                            product="D", tag="eod-hedge-rollback")
+                        self.log("trade", f"{cand['symbol']}: rolled back the hedge "
+                                          "after the short SELL failed")
+                    except UpstoxError as e2:
+                        self.log("error", f"{cand['symbol']}: hedge rollback failed — {e2}. "
+                                          f"You hold a long {hedge.side}; close it manually.")
+                return False
+        target = self._tick(sell_price * (1 - self.cfg.tp_pct / 100))
+        stop = self._tick(sell_price * (1 + self.cfg.sl_pct / 100))
         pos = {
             "id": f"P{next(_seq)}", "symbol": cand["symbol"], "bias": cand["bias"],
             "side": ct.side, "option_key": ct.instrument_key,
@@ -305,6 +334,7 @@ class EODEngine:
                           f"[{self.cfg.mode}] — {cand['symbol']} {cand['bias']} · "
                           f"target ₹{target:.2f} / stop ₹{stop:.2f} · exit: {pos['exit_mode']}"
                           + hedge_txt)
+        return True
 
     async def _monitor(self, now: datetime):
         opens = [p for p in self.positions if p["status"] == "open"]
