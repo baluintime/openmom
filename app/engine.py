@@ -524,6 +524,23 @@ class EODEngine:
         self._close(p, exit_price=price, reason="manual", now=now)
         return True
 
+    async def clear_position(self, pos_id: str) -> bool:
+        """Remove a position from tracking WITHOUT placing any buy/sell order —
+        for a position already handled at the broker or a stale record. Any
+        resting GTT legs are cancelled (best-effort) so they can't fire later;
+        no trade/P&L is booked."""
+        p = next((x for x in self.positions if x["id"] == pos_id and x["status"] == "open"), None)
+        if not p:
+            return False
+        if p["mode"] == "live" and (p.get("gtt_ids") or p.get("gtt_id")):
+            await self._cancel_gtts(p)
+            self.log("trade", f"{p['symbol']}: cancelled resting GTT legs on clear")
+        self.positions = [x for x in self.positions if x is not p]
+        self._save_positions()
+        self.log("trade", f"CLEARED {p['option_symbol']} — removed from tracking, "
+                          "no market order placed")
+        return True
+
     # ---------- status ----------
     def status(self) -> dict:
         now = datetime.now(TZ)

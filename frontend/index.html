@@ -247,7 +247,8 @@ function renderPositions(ps){
       <td>${fmt(p.sell_price)}</td><td>${fmt(p.ltp)}</td><td>${fmt(p.target)}</td><td>${fmt(p.stop)}</td>
       <td class="note">${hd}</td><td class="note">${p.exit_mode||'—'}</td>
       <td class="${cls}"><b>${rs(p.unreal_rs)}</b></td><td>${p.entry_day} ${p.entry_time}</td>
-      <td><button class="small danger" onclick="exitPos('${p.id}')">Exit</button></td></tr>`;});
+      <td style="white-space:nowrap"><button class="small danger" onclick="exitPos('${p.id}')">Exit</button>
+        <button class="small" onclick="clearPos('${p.id}')" title="Remove from tracking without placing any order">Clear</button></td></tr>`;});
   h+='</tbody></table></div>';el.innerHTML=h;
 }
 function renderTrades(ts){
@@ -264,6 +265,8 @@ function renderLog(evs){
 
 async function exitPos(id){if(!confirm('Buy back and close this position now?'))return;
   try{await post('/api/exit',{id});refresh();}catch(e){toast(e.message);}}
+async function clearPos(id){if(!confirm('Remove this position from tracking WITHOUT placing any order? (cancels resting GTTs, books no P&L)'))return;
+  try{await post('/api/clear',{id});refresh();}catch(e){toast(e.message);}}
 
 // ---- controls ----
 $('btnConnect').onclick=()=>location.href='/api/auth/login';

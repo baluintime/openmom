@@ -142,6 +142,15 @@ async def manual_exit(body: dict = Body(...)):
     return {"ok": True}
 
 
+@app.post("/api/clear")
+async def clear_position(body: dict = Body(...)):
+    """Remove a position from tracking without placing any market order."""
+    ok = await engine.clear_position(body.get("id"))
+    if not ok:
+        raise HTTPException(400, "Position not found or already closed")
+    return {"ok": True}
+
+
 @app.get("/api/config")
 async def get_config():
     return asdict(engine.cfg)
