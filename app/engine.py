@@ -214,7 +214,7 @@ class EODEngine:
             self.log("dispatch", f"Opened {opened}/{self.cfg.top_n} positions "
                                  "(remaining picks were un-tradeable/un-hedgeable).")
 
-    def _tick(self, price: float) -> float:
+    def _round_tick(self, price: float) -> float:
         """Round to the exchange tick (₹0.05) — required for GTT trigger prices."""
         t = self.cfg.tick_size or 0.05
         return round(round(price / t) * t, 2)
@@ -302,8 +302,8 @@ class EODEngine:
             hedge = opts[0]   # paper: use the best (ITM) candidate
         if hedge:
             hedge.trading_symbol = self._label(cand["symbol"], hedge)
-        target = self._tick(sell_price * (1 - self.cfg.tp_pct / 100))
-        stop = self._tick(sell_price * (1 + self.cfg.sl_pct / 100))
+        target = self._round_tick(sell_price * (1 - self.cfg.tp_pct / 100))
+        stop = self._round_tick(sell_price * (1 + self.cfg.sl_pct / 100))
         pos = {
             "id": f"P{next(_seq)}", "symbol": cand["symbol"], "bias": cand["bias"],
             "side": ct.side, "option_key": ct.instrument_key,
