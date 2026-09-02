@@ -58,6 +58,20 @@ class EODEngine:
         self.running = False
         self.log("engine", "Strategy disarmed (open positions still tracked)")
 
+    def reschedule(self):
+        """Re-arm today's phases so changed scan/refresh/dispatch times take
+        effect. A phase only re-fires if its (new) time hasn't passed yet today,
+        so this never retroactively re-runs a phase whose time is already gone.
+        Dispatch is additionally capped by top_n open positions."""
+        now = datetime.now(TZ)
+        t = now.time()
+        for phase, key in (("scan", "scan_time"), ("refresh", "refresh_time"),
+                           ("dispatch", "dispatch_time")):
+            if t < parse_hms(getattr(self.cfg, key)):
+                self.phase[phase] = None
+        self.log("config", f"Schedule re-armed — scan {self.cfg.scan_time}, "
+                           f"refresh {self.cfg.refresh_time}, dispatch {self.cfg.dispatch_time}")
+
     def ensure_loop(self):
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
@@ -194,10 +208,11 @@ class EODEngine:
     async def _dispatch(self, now: datetime):
         held = {p["symbol"] for p in self.positions if p["status"] == "open"}
         opened = 0
+        # cap by TOTAL open positions so a re-armed dispatch can't exceed top_n
         # walk the ranked pool; if a top pick can't be traded (illiquid option,
         # un-hedgeable, selection error), fall through to the next-ranked stock
         for c in (getattr(self, "_ranked", None) or self.candidates):
-            if opened >= self.cfg.top_n:
+            if len(held) >= self.cfg.top_n:
                 break
             if c["symbol"] in held:
                 continue
@@ -210,9 +225,10 @@ class EODEngine:
                 continue
             if await self._sell(now, c, ct):
                 opened += 1
-        if opened < self.cfg.top_n:
-            self.log("dispatch", f"Opened {opened}/{self.cfg.top_n} positions "
-                                 "(remaining picks were un-tradeable/un-hedgeable).")
+                held.add(c["symbol"])
+        if len(held) < self.cfg.top_n:
+            self.log("dispatch", f"Opened {opened} new position(s); {len(held)}/{self.cfg.top_n} "
+                                 "held (remaining picks were un-tradeable/un-hedgeable).")
 
     def _round_tick(self, price: float) -> float:
         """Round to the exchange tick (₹0.05) — required for GTT trigger prices."""

@@ -173,9 +173,13 @@ async def set_config(body: dict = Body(...)):
         cfg.validate()
     except (ValueError, TypeError) as e:
         raise HTTPException(400, str(e))
+    times_changed = any(cur.get(k) != getattr(engine.cfg, k)
+                        for k in ("scan_time", "refresh_time", "dispatch_time"))
     engine.cfg = cfg
     save_config(cfg)
     engine.log("config", "Settings updated")
+    if times_changed:
+        engine.reschedule()   # let the new scan/refresh/dispatch times take effect today
     return asdict(cfg)
 
 
