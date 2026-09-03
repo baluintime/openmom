@@ -76,10 +76,9 @@ class EODEngine:
         if self._task is None or self._task.done():
             self._task = asyncio.create_task(self._run())
 
-    @staticmethod
-    def market_hours(now: datetime) -> bool:
-        from datetime import time as _t
-        return now.weekday() < 5 and _t(9, 15) <= now.time() < _t(15, 30)
+    def market_hours(self, now: datetime) -> bool:
+        return (now.weekday() < 5
+                and parse_hms(self.cfg.market_open) <= now.time() < parse_hms(self.cfg.market_close))
 
     # ---------- logging / persistence ----------
     def log(self, kind: str, msg: str):

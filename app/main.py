@@ -21,7 +21,7 @@ app = FastAPI(title="NSE EOD Momentum Options Strategy (Upstox)")
 
 _INT = {"top_n", "lots", "otm_strikes", "shortlist_size", "universe_limit", "hedge_itm_strikes"}
 _NUM = {"tp_pct", "sl_pct", "tick_size", "min_oi", "max_spread_pct", "capital", "charges_per_trade"}
-_STR = {"mode", "scan_time", "refresh_time", "dispatch_time"}
+_STR = {"mode", "scan_time", "refresh_time", "dispatch_time", "market_open", "market_close"}
 _BOOL = {"use_gtt", "hedge_itm", "require_hedge"}
 
 

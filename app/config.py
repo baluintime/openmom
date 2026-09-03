@@ -60,6 +60,8 @@ class EODConfig:
     tp_pct: float = 5.0            # take-profit: option price drops this % (seller gain)
     sl_pct: float = 20.0           # stop-loss: option price rises this % (seller loss)
     tick_size: float = 0.05        # exchange price tick — target/stop rounded to it
+    market_open: str = "09:15"     # session open (IST)
+    market_close: str = "15:30"    # session close (IST) — raise for extended-hours days
     scan_time: str = "15:15"       # initial stock scan (IST)
     refresh_time: str = "15:24:50" # pre-exec rescan of the shortlist
     dispatch_time: str = "15:25"   # place the sell orders + exits
@@ -81,8 +83,13 @@ class EODConfig:
             raise ValueError("tp_pct must be between 0 and 100")
         if self.sl_pct <= 0:
             raise ValueError("sl_pct must be > 0")
-        for k in ("scan_time", "refresh_time", "dispatch_time"):
+        for k in ("scan_time", "refresh_time", "dispatch_time",
+                  "market_open", "market_close"):
             parse_hms(getattr(self, k))  # raises on bad format
+        if parse_hms(self.market_close) <= parse_hms(self.market_open):
+            raise ValueError("market_close must be after market_open")
+        if parse_hms(self.dispatch_time) >= parse_hms(self.market_close):
+            raise ValueError("dispatch_time must be before market_close")
         if self.top_n > self.shortlist_size:
             raise ValueError("top_n cannot exceed shortlist_size")
 
